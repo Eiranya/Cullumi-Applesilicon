@@ -405,7 +405,7 @@ function handleGalleryClick(event) {
   }
   const restoreButton = event.target.closest("[data-restore]");
   if (restoreButton) {
-    restore(restoreButton.dataset.restore);
+    confirmRestore(restoreButton.dataset.restore);
     return;
   }
   const opener = event.target.closest("[data-open-id]");
@@ -597,8 +597,9 @@ async function quarantine() {
   $("#confirmTitle").textContent = `确认隔离 ${d.count} 张照片？`;
   $("#confirmBody").innerHTML =
     `<p>总大小 ${formatSize(d.total_size)}。照片将移入项目内的可恢复隔离区，不会直接删除。</p><div class="confirm-list scroll-fade-region">${d.items.map((x) => esc(x.relative_path)).join("<br>")}</div>`;
-  $("#confirmOk").textContent = "确认隔离";
-  $("#confirmOk").onclick = async () => {
+  const button = prepareConfirmAction();
+  button.textContent = "确认隔离";
+  button.onclick = async () => {
     $("#confirm").close();
     const r = await json("/api/quarantine/apply", {
       project_id: state.project.id,
@@ -617,6 +618,29 @@ async function restore(id) {
   toast(`恢复 ${r.restored} 张，文件名冲突 ${r.conflicts} 张`);
   await refreshProject();
   loadView();
+}
+function confirmRestore(id) {
+  const dialog = $("#confirm"),
+    button = prepareConfirmAction("primary");
+  $("#confirmTitle").textContent = "恢复此批次？";
+  $("#confirmBody").textContent =
+    "此批次中的照片将恢复到原照片文件夹；若原位置已有同名文件，将使用新的恢复文件名，不会覆盖现有文件。";
+  button.textContent = "确认恢复";
+  dialog.addEventListener("close", () => prepareConfirmAction(), {
+    once: true,
+  });
+  button.onclick = async () => {
+    button.disabled = true;
+    try {
+      await restore(id);
+      dialog.close();
+    } catch (error) {
+      toast(`恢复失败：${error.message}`);
+    } finally {
+      button.disabled = false;
+    }
+  };
+  dialog.showModal();
 }
 async function finishDecisionImport(result) {
   toast(
@@ -637,7 +661,7 @@ async function importDecisionCsv(path) {
   $("#confirmTitle").textContent = "CSV 中存在多格式决定冲突";
   $("#confirmBody").textContent =
     `发现 ${result.conflicting_groups} 组同名 RAW 与其他图片格式被指定了不同决定。关闭“相同照片同时决定”后，将按 CSV 中每个文件各自的决定导入。`;
-  const button = $("#confirmOk");
+  const button = prepareConfirmAction();
   button.textContent = "关闭同步并导入";
   button.onclick = async () => {
     button.disabled = true;

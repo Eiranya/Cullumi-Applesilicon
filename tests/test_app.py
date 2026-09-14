@@ -591,14 +591,39 @@ class AppSafetyTests(unittest.TestCase):
         self.assertEqual(set(revisions), {expected})
         self.assertIn(f'window.ASSET_REVISION="{expected}"', html)
         self.assertNotIn("__ASSET_REVISION__", html)
-        self.assertNotIn("__ICON_SYMBOLS__", html)
+        self.assertNotIn("__ICON_SPRITE__", html)
         self.assertIn('<symbol id="topbar-setting"', html)
         self.assertIn('href="#topbar-setting"', html)
-        self.assertNotIn('href="/static/assets/icons.svg', html)
+        self.assertNotIn("icons.svg", html)
         self.assertIn(
             mock.call("Cache-Control", "no-store"),
             handler.send_header.call_args_list,
         )
+
+    def test_rendered_index_accepts_an_xml_declared_svg_sprite(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            web = Path(temporary)
+            assets = web / "assets"
+            assets.mkdir()
+            (web / "index.html").write_text(
+                "__ICON_SPRITE__ __APP_TOKEN__ __ASSET_REVISION__",
+                encoding="utf-8",
+            )
+            (assets / "icons.svg").write_text(
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<svg xmlns="http://www.w3.org/2000/svg">'
+                '<symbol id="test-icon" viewBox="0 0 1 1">'
+                '<path d="M0 0h1v1z"/></symbol></svg>',
+                encoding="utf-8",
+            )
+
+            html = app.rendered_index(web, "test-token")
+
+        self.assertIn('<svg xmlns="http://www.w3.org/2000/svg"', html)
+        self.assertIn('class="icon-sprite"', html)
+        self.assertIn('<symbol id="test-icon"', html)
+        self.assertIn("test-token", html)
+        self.assertNotIn("__ICON_SPRITE__", html)
 
     def test_invalid_settings_do_not_partially_mutate_configuration(self):
         with tempfile.TemporaryDirectory() as temporary:

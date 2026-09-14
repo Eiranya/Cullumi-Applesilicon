@@ -2,7 +2,6 @@
   .toolbar {
     display:grid;
     grid-template-columns:minmax(0,1fr) auto auto minmax(120px,210px);
-    align-items:center;
     gap:10px 8px;
   }
 
@@ -14,8 +13,6 @@
   .library-filters {
     grid-column:2;
     grid-row:2;
-    flex-wrap:nowrap;
-    justify-content:flex-end;
     margin:0;
   }
 
@@ -28,9 +25,7 @@
   .search {
     grid-column:4;
     grid-row:2;
-    width:100%;
     min-width:0;
-    margin:0;
   }
 
   .search input {
@@ -43,7 +38,6 @@
     grid-row:2;
     gap: 6px;
     margin:0;
-    white-space: nowrap;
   }
 }
 
@@ -67,8 +61,7 @@
     grid-template-columns: repeat(auto-fill, minmax(170px, 210px));
   }
 
-  .similar-browser.detail-open,
-  .similar-browser.detail-open:not(.detail-expanded) {
+  .similar-browser.detail-open {
     display: block;
   }
 

@@ -66,7 +66,7 @@ function galleryToolMarkup(options) {
         ? `data-similar-select-all="${group.key}"`
         : `data-select-all="${group.key}"`;
     return `<div id="${ids.item}" class="gallery-view-item">
-      <button class="gallery-view-option" type="button"><span>${group.title}</span><b id="${ids.summary}">全部</b><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="${ICONS_URL}#chevron-down"></use></svg></button>
+      <button class="gallery-view-option" type="button"><span>${group.title}</span><b id="${ids.summary}">全部</b><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="#chevron-down"></use></svg></button>
       <div class="gallery-view-submenu">
         <div class="multi-filter-head"><b>${group.title}</b><button type="button" data-gallery-select-all="${group.key}" ${selectAttribute}>全选</button></div>
         ${labels}
@@ -88,13 +88,13 @@ function galleryToolMarkup(options) {
       : `data-sort-direction="${value}"`;
   return `<div id="${options.ids.viewTool}" class="multi-filter gallery-tool" data-filter-menu="${options.viewMenu}">
     <button class="multi-filter-trigger gallery-tool-trigger" type="button" aria-expanded="false" aria-controls="${options.ids.viewPanel}">
-      <svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="${ICONS_URL}#gallery-filter"></use></svg><span>查看</span><svg class="gallery-tool-chevron" viewBox="0 0 1024 1024" aria-hidden="true"><use href="${ICONS_URL}#chevron-down"></use></svg>
+      <svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="#gallery-filter"></use></svg><span>查看</span><svg class="gallery-tool-chevron" viewBox="0 0 1024 1024" aria-hidden="true"><use href="#chevron-down"></use></svg>
     </button>
     <div id="${options.ids.viewPanel}" class="multi-filter-panel gallery-tool-panel gallery-view-panel hidden">${filterItems}</div>
   </div>
   <div id="${options.ids.sortTool}" class="multi-filter gallery-tool" data-filter-menu="${options.sortMenu}">
     <button class="multi-filter-trigger gallery-tool-trigger" type="button" aria-expanded="false" aria-controls="${options.ids.sortPanel}">
-      <svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="${ICONS_URL}#gallery-sort"></use></svg><span>排序</span><svg class="gallery-tool-chevron" viewBox="0 0 1024 1024" aria-hidden="true"><use href="${ICONS_URL}#chevron-down"></use></svg>
+      <svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="#gallery-sort"></use></svg><span>排序</span><svg class="gallery-tool-chevron" viewBox="0 0 1024 1024" aria-hidden="true"><use href="#chevron-down"></use></svg>
     </button>
     <div id="${options.ids.sortPanel}" class="multi-filter-panel gallery-tool-panel gallery-sort-panel hidden">
       ${sortItems}

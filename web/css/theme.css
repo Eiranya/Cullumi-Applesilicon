@@ -132,13 +132,6 @@
   border-color: var(--pink);
 }
 
-[data-theme="night"] #scanBtn,
-[data-theme="night"] #confirmOk.confirm-accept-action {
-  color: #fff;
-  background: var(--pink);
-  border-color: var(--pink);
-}
-
 [data-theme="night"] .batch-accept-button {
   color: var(--pink);
   background: var(--card);
@@ -170,19 +163,6 @@
   border-color: var(--pink-hover);
 }
 
-[data-theme="night"] #libraryBackToTop:hover:not(:disabled) {
-  color: var(--pink-hover);
-  background: var(--surface-hover);
-  border-color: var(--pink-hover);
-}
-
-[data-theme="night"] #scanBtn:hover:not(:disabled),
-[data-theme="night"] #confirmOk.confirm-accept-action:hover:not(:disabled) {
-  color: #fff;
-  background: var(--pink-hover);
-  border-color: var(--pink-hover);
-}
-
 [data-theme="night"] .toolbar .batch-accept-button:hover:not(:disabled) {
   color: var(--pink-hover);
   background: var(--surface-hover);
@@ -208,7 +188,7 @@
   border-color: var(--red);
 }
 
-[data-theme="night"] .danger:hover:not(:disabled),
+[data-theme="night"] button.danger:hover:not(:disabled),
 [data-theme="night"] #quarantineBtn:hover:not(:disabled),
 [data-theme="night"] #deleteProfile:hover:not(:disabled),
 [data-theme="night"] .decision-remove .card-actions .danger:hover:not(:disabled),

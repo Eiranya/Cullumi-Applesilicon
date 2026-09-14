@@ -1,7 +1,4 @@
 const TOKEN = window.APP_TOKEN;
-// Symbols are injected into the page so every supported Windows WebView can
-// resolve <use> references without loading an external SVG document.
-const ICONS_URL = "";
 const DECISION_VALUES = ["undecided", "keep", "remove"],
   AI_VALUES = ["remove", "review", "no_suggestion"],
   FORMAT_VALUES = ["raw", "jpeg", "heif", "png", "other"],
@@ -75,6 +72,14 @@ const state = {
 };
 const $ = (s) => document.querySelector(s),
   $$ = (s) => [...document.querySelectorAll(s)];
+const CONFIRM_ACTION_CLASSES = ["danger", "primary", "confirm-accept-action"];
+function prepareConfirmAction(className = "danger") {
+  const button = $("#confirmOk");
+  button.disabled = false;
+  button.classList.remove(...CONFIRM_ACTION_CLASSES);
+  button.classList.add(className);
+  return button;
+}
 const api = async (path, body) => {
   const opts =
     body === undefined

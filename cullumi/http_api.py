@@ -9,6 +9,7 @@ import secrets
 import stat
 import urllib.parse
 import webbrowser
+import xml.etree.ElementTree as ET
 from contextlib import closing
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
@@ -79,6 +80,8 @@ TOKEN = secrets.token_urlsafe(24)
 WEB_ROOT = Path(__file__).resolve().parent.parent / "web"
 APPLICATION: ApplicationContext | None = None
 FILE_RESPONSE_CHUNK_SIZE = 256 * 1024
+SVG_NAMESPACE = "http://www.w3.org/2000/svg"
+ET.register_namespace("", SVG_NAMESPACE)
 GET_ROUTES = {
     "/api/bootstrap": "api_bootstrap",
     "/api/recent-project": "api_recent_project",
@@ -145,19 +148,27 @@ def static_asset_revision(web_root: Path) -> str:
 def rendered_index(web_root: Path, token: str) -> str:
     """Render the page with a local SVG sprite for WebView compatibility."""
     html = (web_root / "index.html").read_text(encoding="utf-8")
-    sprite = (web_root / "assets" / "icons.svg").read_text(encoding="utf-8")
-    opening_end = sprite.find(">")
-    closing_start = sprite.rfind("</svg>")
-    if opening_end < 0 or closing_start <= opening_end:
+    try:
+        sprite = ET.parse(web_root / "assets" / "icons.svg").getroot()
+    except (ET.ParseError, OSError) as error:
+        raise ValueError("图标资源格式无效") from error
+    if sprite.tag != f"{{{SVG_NAMESPACE}}}svg":
         raise ValueError("图标资源格式无效")
-    symbols = sprite[opening_end + 1 : closing_start]
+    symbols = sprite.findall(f"{{{SVG_NAMESPACE}}}symbol")
+    symbol_ids = [symbol.get("id", "") for symbol in symbols]
+    if not symbol_ids or any(not symbol_id for symbol_id in symbol_ids):
+        raise ValueError("图标资源缺少有效 symbol")
+    if len(symbol_ids) != len(set(symbol_ids)):
+        raise ValueError("图标资源包含重复 symbol")
+    if html.count("__ICON_SPRITE__") != 1:
+        raise ValueError("页面缺少唯一的图标占位符")
+    sprite.set("class", "icon-sprite")
+    sprite.set("aria-hidden", "true")
+    sprite.set("focusable", "false")
+    sprite_markup = ET.tostring(sprite, encoding="unicode")
     revision = static_asset_revision(web_root)
     return (
-        html.replace("__ICON_SYMBOLS__", symbols)
-        .replace(
-            "/static/assets/icons.svg?v=__ASSET_REVISION__#",
-            "#",
-        )
+        html.replace("__ICON_SPRITE__", sprite_markup)
         .replace("__APP_TOKEN__", token)
         .replace("__ASSET_REVISION__", revision)
     )

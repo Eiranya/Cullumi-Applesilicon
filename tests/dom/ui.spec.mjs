@@ -4,8 +4,7 @@ import { expect, test } from "playwright/test";
 const token = process.env.CULLUMI_DOM_TOKEN || "cullumi-dom-test";
 const image = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='24'%3E%3Crect width='32' height='24' fill='%23d9b7bd'/%3E%3C/svg%3E";
 const runtimeProblems = new WeakMap();
-const iconHref = (name) =>
-  new RegExp(`^#${name}$`);
+const iconHref = name => `#${name}`;
 
 const profiles = [
   { id: "conservative", name: "保守筛选", builtin: true, quality: { enabled: { niqe: true } }, similarity: { blink: { enabled: true, face_confidence_min: 0.85, open_confidence_min: 0.8, closed_confidence_min: 0.8, min_eye_distance_px: 12, reliable_coverage_min: 0.8 } } },
@@ -104,6 +103,7 @@ async function installApi(page, options = {}) {
   let syncVariantDecisions = options.syncVariantDecisions ?? true;
   let removeReviewOnAccept = options.removeReviewOnAccept ?? false;
   let confirmAcceptSuggestions = options.confirmAcceptSuggestions ?? true;
+  let quarantineRestored = false;
   const decisions = new Map();
   const requests = [];
   const similarPhoto = id => {
@@ -357,7 +357,13 @@ async function installApi(page, options = {}) {
     }
     if (url.pathname === "/api/quarantine/batches") {
       return fulfill({
-        items: [{ id: "batch-1", created_at: "2026-08-20 10:00", count: 1, total_size: 1024, restored_at: "" }],
+        items: [{
+          id: "batch-1",
+          created_at: "2026-08-20 10:00",
+          count: 1,
+          total_size: 1024,
+          restored_at: quarantineRestored ? "2026-08-20 10:05" : "",
+        }],
       });
     }
     if (url.pathname === "/api/quarantine/preview") {
@@ -454,6 +460,7 @@ async function installApi(page, options = {}) {
       });
     }
     if (url.pathname === "/api/quarantine/restore") {
+      quarantineRestored = true;
       return fulfill({ restored: 1, conflicts: 0, missing: 0 });
     }
     return fulfill({ error: `DOM 测试未模拟接口 ${url.pathname}` }, 501);
@@ -473,6 +480,45 @@ async function openProject(page) {
   await page.locator("#recentList .recent").click();
   await expect(page.locator("#workspace")).toBeVisible();
   await expect(page.locator('[data-photo-id="1"]')).toBeVisible();
+}
+
+const acceptRequests = requests =>
+  requests.filter(request => request.path === "/api/decision/accept");
+
+async function confirmPendingAccept(page, requests) {
+  const before = acceptRequests(requests).length;
+  await page.locator("#confirmOk").click();
+  await expect.poll(() => acceptRequests(requests).length).toBe(before + 1);
+  return acceptRequests(requests).at(-1);
+}
+
+async function toolbarRects(page, selectors) {
+  return page.locator(".toolbar").evaluate((toolbar, requested) =>
+    Object.fromEntries(Object.entries(requested).map(([name, selector]) => {
+      const node = selector === ":scope" ? toolbar : toolbar.querySelector(selector);
+      const box = node.getBoundingClientRect();
+      return [name, {
+        top: box.top,
+        right: box.right,
+        bottom: box.bottom,
+        left: box.left,
+        width: box.width,
+        height: box.height,
+        center: (box.top + box.bottom) / 2,
+      }];
+    })), selectors);
+}
+
+const buttonColors = control => control.evaluate(element => {
+  const style = getComputedStyle(element);
+  return [style.backgroundColor, style.color, style.borderColor];
+});
+
+async function hoveredButtonColors(page, control) {
+  await control.hover();
+  await page.evaluate(() =>
+    document.getAnimations().forEach(animation => animation.finish()));
+  return buttonColors(control);
 }
 
 test.beforeEach(async ({ page }) => {
@@ -496,7 +542,12 @@ test("首页加载全部脚本并异步渲染最近项目", async ({ page }) => 
   await expect(page).toHaveTitle("Cullumi");
   await expect(page.locator("#appVersion")).toHaveText("v1.0.4");
   await expect(page.locator("#chooseBtn svg use")).toHaveAttribute("href", iconHref("home-folder"));
-  expect(await page.locator("#chooseBtn svg").evaluate((icon) => icon.getBBox().width)).toBeGreaterThan(0);
+  const iconBounds = await page.locator("#chooseBtn svg use").evaluate((icon) => {
+    const box = icon.getBBox();
+    return { width: box.width, height: box.height };
+  });
+  expect(iconBounds.width).toBeGreaterThan(0);
+  expect(iconBounds.height).toBeGreaterThan(0);
   await expect(page.locator("#recentList .recent-meta")).toContainText("2 张");
   await expect(page.locator("#recentList .recent-thumb img")).toHaveCount(1);
   await expect(page.locator("#recentList .recent-more svg use").first()).toHaveAttribute("href", iconHref("home-more"));
@@ -786,36 +837,22 @@ test("智能建议工具栏按内容区宽度分行且标题保持单行", async
   await openProject(page);
   await page.locator('[data-nav="ai"]').click();
 
-  const positions = () => page.locator(".toolbar").evaluate(toolbar => {
-    const box = selector => {
-      const node = selector === ":scope" ? toolbar : toolbar.querySelector(selector);
-      const rect = node.getBoundingClientRect();
-      return {
-        top: rect.top,
-        right: rect.right,
-        bottom: rect.bottom,
-        left: rect.left,
-        width: rect.width,
-        height: rect.height,
-      };
-    };
-    return {
-      toolbar: box(":scope"),
-      heading: box(":scope > div:first-child"),
-      title: box("#viewTitle"),
-      filters: box("#libraryFilters"),
-      action: box("#acceptSuggestionsBtn"),
-      search: box(".search"),
-    };
-  });
-  const medium = await positions();
+  const selectors = {
+    toolbar: ":scope",
+    heading: ":scope > div:first-child",
+    title: "#viewTitle",
+    filters: "#libraryFilters",
+    action: "#acceptSuggestionsBtn",
+    search: ".search",
+  };
+  const medium = await toolbarRects(page, selectors);
   expect(medium.title.height).toBeLessThan(30);
   expect(medium.heading.bottom).toBeLessThanOrEqual(medium.filters.top);
   expect(Math.abs(medium.filters.top - medium.action.top)).toBeLessThan(1);
   expect(medium.search.right).toBeLessThanOrEqual(medium.toolbar.right);
 
   await page.setViewportSize({ width: 1040, height: 720 });
-  const narrow = await positions();
+  const narrow = await toolbarRects(page, selectors);
   expect(narrow.title.height).toBeLessThan(30);
   expect(Math.abs(narrow.filters.top - narrow.action.top)).toBeLessThan(1);
   expect(Math.abs(narrow.search.top - narrow.filters.top)).toBeLessThan(1);
@@ -830,28 +867,15 @@ test("相似连拍窄窗口工具栏在标题下保持同一行", async ({ page 
   await page.locator('[data-nav="similar"]').click();
   await page.locator('[data-similar-group="similar-1"]').click();
 
-  const positions = await page.locator(".toolbar").evaluate((toolbar) => {
-    const rect = (selector) => {
-      const box = toolbar.querySelector(selector).getBoundingClientRect();
-      return {
-        top: box.top,
-        right: box.right,
-        bottom: box.bottom,
-        left: box.left,
-        center: (box.top + box.bottom) / 2,
-      };
-    };
-    const toolbarBox = toolbar.getBoundingClientRect();
-    return {
-      toolbarRight: toolbarBox.right,
-      heading: rect(":scope > div:first-child"),
-      collapse: rect("#similarCollapseBtn"),
-      expand: rect("#similarExpandBtn"),
-      view: rect("#similarViewTool .gallery-tool-trigger"),
-      sort: rect("#similarSortTool .gallery-tool-trigger"),
-      accept: rect("#acceptSuggestionsBtn"),
-      search: rect(".search"),
-    };
+  const positions = await toolbarRects(page, {
+    toolbar: ":scope",
+    heading: ":scope > div:first-child",
+    collapse: "#similarCollapseBtn",
+    expand: "#similarExpandBtn",
+    view: "#similarViewTool .gallery-tool-trigger",
+    sort: "#similarSortTool .gallery-tool-trigger",
+    accept: "#acceptSuggestionsBtn",
+    search: ".search",
   });
   const controls = [
     positions.collapse,
@@ -865,8 +889,8 @@ test("相似连拍窄窗口工具栏在标题下保持同一行", async ({ page 
   expect(Math.min(...controls.map((item) => item.top))).toBeGreaterThanOrEqual(positions.heading.bottom);
   for (let index = 1; index < controls.length; index += 1)
     expect(controls[index].left).toBeGreaterThanOrEqual(controls[index - 1].right);
-  expect(positions.search.right).toBeLessThanOrEqual(positions.toolbarRight);
-  expect(positions.search.right).toBeGreaterThanOrEqual(positions.toolbarRight - 1);
+  expect(positions.search.right).toBeLessThanOrEqual(positions.toolbar.right);
+  expect(positions.search.right).toBeGreaterThanOrEqual(positions.toolbar.right - 1);
 });
 
 test("一键采纳显示在指定页面并提交当前范围", async ({ page }) => {
@@ -878,18 +902,13 @@ test("一键采纳显示在指定页面并提交当前范围", async ({ page }) 
   expect(await accept.evaluate(button => button.nextElementSibling?.classList.contains("search"))).toBe(true);
 
   await accept.click();
-  await expect(page.locator("#confirmOk")).toHaveClass(/confirm-accept-action/);
-  await expect(page.locator("#confirmOk")).not.toHaveClass(/danger/);
   await expect(page.locator("#confirmBody > p").first()).toHaveText(
     "建议移除照片会标记为“移除”，人工复查和无建议照片保持未决定。不会修改已决定照片。",
   );
   await expect(page.locator("#acceptSuggestionsDontAsk")).not.toBeChecked();
-  await page.locator("#confirmOk").click();
-  await expect(page.locator("#confirmOk")).toHaveClass(/danger/);
-  await expect(page.locator("#confirmOk")).not.toHaveClass(/confirm-accept-action/);
-  await expect.poll(() => requests.some(request =>
-    request.path === "/api/decision/accept" && request.body?.scope === "library",
-  )).toBe(true);
+  expect((await confirmPendingAccept(page, requests)).body).toMatchObject({
+    scope: "library",
+  });
 
   await page.locator('[data-nav="keep"]').click();
   await expect(accept).toBeHidden();
@@ -901,23 +920,20 @@ test("一键采纳显示在指定页面并提交当前范围", async ({ page }) 
   await page.locator('[data-nav="similar"]').click();
   await expect(accept).toBeVisible();
   await accept.click();
-  await page.locator("#confirmOk").click();
-  await expect.poll(() => requests.some(request =>
-    request.path === "/api/decision/accept" &&
-    request.body?.scope === "similar" && !request.body?.group_id,
-  )).toBe(true);
+  const similarRequest = await confirmPendingAccept(page, requests);
+  expect(similarRequest.body).toMatchObject({ scope: "similar" });
+  expect(similarRequest.body.group_id).toBeUndefined();
 
   await page.locator('[data-similar-group="similar-1"]').click();
   await expect(accept).toBeVisible();
   await accept.click();
-  await page.locator("#confirmOk").click();
-  await expect.poll(() => requests.some(request =>
-    request.path === "/api/decision/accept" && request.body?.group_id === "similar-1",
-  )).toBe(true);
+  expect((await confirmPendingAccept(page, requests)).body).toMatchObject({
+    group_id: "similar-1",
+  });
 });
 
 test("一键采纳图标、工具栏间距与扫描按钮主题样式正确", async ({ page }) => {
-  await openApp(page);
+  const requests = await openApp(page);
   await openProject(page);
 
   const accept = page.locator("#acceptSuggestionsBtn");
@@ -965,12 +981,17 @@ test("一键采纳图标、工具栏间距与扫描按钮主题样式正确", as
 
   await accept.click();
   await expect(page.locator("#confirm")).toBeVisible();
-  const confirmStyle = await page.locator("#confirmOk").evaluate((button) => {
+  const confirmOk = page.locator("#confirmOk");
+  await expect(confirmOk).toHaveClass(/confirm-accept-action/);
+  await expect(confirmOk).not.toHaveClass(/danger/);
+  const confirmStyle = await confirmOk.evaluate((button) => {
     const style = getComputedStyle(button);
     return [style.backgroundColor, style.color, style.borderColor];
   });
   expect(confirmStyle).toEqual(night.scan);
-  await page.locator('#confirm [data-close]').click();
+  await confirmPendingAccept(page, requests);
+  await expect(confirmOk).toHaveClass(/danger/);
+  await expect(confirmOk).not.toHaveClass(/confirm-accept-action/);
 
   await page.locator('[data-nav="similar"]').click();
   const similarGap = await page.evaluate(() => {
@@ -981,15 +1002,41 @@ test("一键采纳图标、工具栏间距与扫描按钮主题样式正确", as
   expect(similarGap).toBe(8);
 });
 
-test("一键采纳的人工复查设置会保存", async ({ page }) => {
-  const requests = await openApp(page);
+test("危险确认按钮与删除自定义模式保持相同样式", async ({ page }) => {
+  await openApp(page);
+  await openProject(page);
+
   await page.locator("#settingsBtn").click();
-  const setting = page.locator("#removeReviewOnAccept");
-  await expect(setting).not.toBeChecked();
-  await page.locator('label[for="removeReviewOnAccept"]').click();
-  await expect.poll(() => requests.some(request =>
-    request.path === "/api/settings" && request.body?.remove_review_on_accept === true,
-  )).toBe(true);
+  await page.locator('[data-setting="profiles"]').click();
+  const deleteProfile = page.locator("#deleteProfile");
+  const dangerColors = await buttonColors(deleteProfile);
+  const dangerHoverColors = await hoveredButtonColors(page, deleteProfile);
+  await page.locator('#settings [data-close]').click();
+
+  const confirmOk = page.locator("#confirmOk");
+  const assertDangerConfirm = async (label) => {
+    await expect(confirmOk).toHaveText(label);
+    await expect(confirmOk).toHaveClass(/danger/);
+    await expect(confirmOk).not.toHaveClass(/primary|confirm-accept-action/);
+    expect(await buttonColors(confirmOk)).toEqual(dangerColors);
+    expect(await hoveredButtonColors(page, confirmOk)).toEqual(dangerHoverColors);
+    await page.locator('#confirm [data-close]').click();
+  };
+
+  await page.locator('[data-photo-id="1"] [data-decision="remove"]').click();
+  await expect(page.locator("#clearDecisionsBtn")).toBeEnabled();
+  await page.locator("#clearDecisionsBtn").click();
+  await assertDangerConfirm("确认清空");
+
+  await page.locator("#quarantineBtn").click();
+  await expect(page.locator("#confirm")).toBeVisible();
+  await assertDangerConfirm("确认隔离");
+
+  await page.locator("#homeBtn").click();
+  await page.locator("#recentList .recent-more").click();
+  await page.locator("#recentRemove").click();
+  await expect(page.locator("#confirm")).toBeVisible();
+  await assertDangerConfirm("确认移除");
 });
 
 test("一键采纳可以不再提醒并在设置中重新开启确认", async ({ page }) => {
@@ -999,18 +1046,23 @@ test("一键采纳可以不再提醒并在设置中重新开启确认", async ({
 
   await accept.click();
   await page.locator("#acceptSuggestionsDontAsk").check();
-  await page.locator("#confirmOk").click();
+  await confirmPendingAccept(page, requests);
   await expect.poll(() => requests.some(request =>
     request.path === "/api/settings" && request.body?.confirm_accept_suggestions === false,
   )).toBe(true);
-  await expect.poll(() => requests.filter(request => request.path === "/api/decision/accept").length).toBe(1);
 
-  const acceptedBefore = requests.filter(request => request.path === "/api/decision/accept").length;
+  const acceptedBefore = acceptRequests(requests).length;
   await accept.click();
   await expect(page.locator("#confirm")).toBeHidden();
-  await expect.poll(() => requests.filter(request => request.path === "/api/decision/accept").length).toBe(acceptedBefore + 1);
+  await expect.poll(() => acceptRequests(requests).length).toBe(acceptedBefore + 1);
 
   await page.locator("#settingsBtn").click();
+  const removeReview = page.locator("#removeReviewOnAccept");
+  await expect(removeReview).not.toBeChecked();
+  await page.locator('label[for="removeReviewOnAccept"]').click();
+  await expect.poll(() => requests.some(request =>
+    request.path === "/api/settings" && request.body?.remove_review_on_accept === true,
+  )).toBe(true);
   const setting = page.locator("#confirmAcceptSuggestions");
   await expect(setting).not.toBeChecked();
   await page.locator('label[for="confirmAcceptSuggestions"]').click();
@@ -1945,13 +1997,41 @@ test("动态封面修改提醒可以记住不修改", async ({ page }) => {
   await expect(page.locator("#motionCoverWriteback")).toHaveValue("never");
 });
 
-test("隔离历史可以通过委托事件恢复批次", async ({ page }) => {
+test("隔离历史恢复批次需要确认并使用主要操作样式", async ({ page }) => {
   const requests = await openApp(page);
   await openProject(page);
+
+  await page.locator("#settingsBtn").click();
+  await page.locator('[data-setting="profiles"]').click();
+  const saveProfile = page.locator("#saveProfile");
+  const primaryColors = await buttonColors(saveProfile);
+  const primaryHoverColors = await hoveredButtonColors(page, saveProfile);
+  await page.locator('#settings [data-close]').click();
+
   await page.locator('[data-nav="quarantine"]').click();
-  await expect(page.locator('[data-restore="batch-1"]')).toBeVisible();
-  await page.locator('[data-restore="batch-1"]').click();
+  const restoreButton = page.locator('[data-restore="batch-1"]');
+  await expect(restoreButton).toBeVisible();
+  await restoreButton.click();
+  await expect(page.locator("#confirmTitle")).toHaveText("恢复此批次？");
+  await expect(page.locator("#confirmBody")).toContainText("不会覆盖现有文件");
+  const confirmOk = page.locator("#confirmOk");
+  await expect(confirmOk).toHaveText("确认恢复");
+  await expect(confirmOk).toHaveClass(/primary/);
+  await expect(confirmOk).not.toHaveClass(/danger/);
+  await expect(confirmOk).not.toHaveClass(/confirm-accept-action/);
+  expect(await buttonColors(confirmOk)).toEqual(primaryColors);
+  expect(await hoveredButtonColors(page, confirmOk)).toEqual(primaryHoverColors);
+  expect(requests.some(request => request.path === "/api/quarantine/restore")).toBe(false);
+
+  await page.locator('#confirm [data-close]').click();
+  await expect(confirmOk).toHaveClass(/danger/);
+  expect(requests.some(request => request.path === "/api/quarantine/restore")).toBe(false);
+
+  await restoreButton.click();
+  await confirmOk.click();
   await expect(page.locator("#toast")).toContainText("恢复 1 张");
+  await expect(restoreButton).toBeHidden();
+  await expect(page.locator("#gallery")).toContainText("已恢复");
   expect(requests.find(request => request.path === "/api/quarantine/restore")?.body).toMatchObject({
     project_id: "project-1",
     batch_id: "batch-1",

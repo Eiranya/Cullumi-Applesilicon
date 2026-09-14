@@ -587,7 +587,7 @@ button.primary:hover:not(:disabled),
   background: var(--keep-hover-dark);
 }
 
-.danger:hover:not(:disabled),
+button.danger:hover:not(:disabled),
 #quarantineBtn:hover:not(:disabled),
 #deleteProfile:hover:not(:disabled),
 .decision-remove .card-actions .danger:hover:not(:disabled) {

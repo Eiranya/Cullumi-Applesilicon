@@ -82,27 +82,25 @@ class WebResourceContractTests(unittest.TestCase):
     def test_svg_symbols_and_references_are_exactly_in_sync(self):
         sprite = self.web / "assets" / "icons.svg"
         namespace = {"svg": "http://www.w3.org/2000/svg"}
-        symbols = {
-            element.attrib["id"]
+        symbol_ids = [
+            element.attrib.get("id")
             for element in ET.parse(sprite).getroot().findall(
                 "svg:symbol", namespace
             )
-        }
+        ]
+        self.assertNotIn(None, symbol_ids)
+        self.assertEqual(len(symbol_ids), len(set(symbol_ids)))
+        symbols = set(symbol_ids)
         sources = [self.web / "index.html", *(self.web / "js").glob("*.js")]
         references = set()
         for source in sources:
             content = source.read_text(encoding="utf-8")
+            self.assertNotIn("icons.svg", content, source)
+            self.assertNotIn("ICONS_URL", content, source)
             references.update(
                 match.group(1)
                 for match in re.finditer(
-                    r"(?:icons\.svg[^#\"']*|ICONS_URL\})#([A-Za-z0-9_-]+)",
-                    content,
-                )
-            )
-            references.update(
-                match.group(1)
-                for match in re.finditer(
-                    r'''href=["']#([A-Za-z0-9_-]+)''',
+                    r'''<use\b[^>]*\bhref=["']#([A-Za-z0-9_-]+)["']''',
                     content,
                 )
             )

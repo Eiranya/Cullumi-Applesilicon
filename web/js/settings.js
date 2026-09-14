@@ -442,8 +442,9 @@ function confirmRemoveRecent() {
   $("#confirmTitle").textContent = "从最近项目中移除？";
   $("#confirmBody").innerHTML =
     `<p>“${esc(project.root.split(/[\\/]/).pop())}”将从首页列表移除。真实照片不会被删除或移动。</p><label class="toggle confirm-option"><input id="deleteProjectCache" type="checkbox"><span>同时删除项目缓存（包含原图备份）</span></label><p class="confirm-note">不勾选时，数据库、缩略图和原图备份会保留，今后重新打开该照片目录可继续使用。</p>`;
-  $("#confirmOk").textContent = "确认移除";
-  $("#confirmOk").onclick = async () => {
+  const button = prepareConfirmAction();
+  button.textContent = "确认移除";
+  button.onclick = async () => {
     const deleteCache = $("#deleteProjectCache").checked;
     try {
       await json("/api/project/remove-recent", {
@@ -496,8 +497,9 @@ function confirmDeleteProfile() {
   $("#confirmTitle").textContent = "删除自定义模式？";
   $("#confirmBody").textContent =
     `“${profile.name}”将从本机配置中删除，此操作无法撤销。`;
-  $("#confirmOk").textContent = "确认删除";
-  $("#confirmOk").onclick = async () => {
+  const button = prepareConfirmAction();
+  button.textContent = "确认删除";
+  button.onclick = async () => {
     try {
       await json("/api/profile/delete", { profile_id: profile.id });
       $("#confirm").close();
@@ -529,8 +531,9 @@ function confirmClearDecisions() {
   $("#confirmTitle").textContent = "清空所有选择？";
   $("#confirmBody").textContent =
     `将清除当前项目中 ${count} 张照片的“保留/移除”选择，照片文件不会被移动或删除。`;
-  $("#confirmOk").textContent = "确认清空";
-  $("#confirmOk").onclick = async () => {
+  const button = prepareConfirmAction();
+  button.textContent = "确认清空";
+  button.onclick = async () => {
     try {
       const r = await json("/api/decision/clear", {
         project_id: state.project.id,
@@ -614,18 +617,11 @@ function confirmAcceptSuggestions() {
       : "建议移除照片会标记为“移除”，人工复查和无建议照片保持未决定。不会修改已决定照片。";
   $("#confirmBody").innerHTML =
     `<p>${esc(message)}</p><label class="toggle confirm-option"><input id="acceptSuggestionsDontAsk" type="checkbox"><span>不再提醒</span></label><p class="confirm-note">可以随时在设置中重新开启确认。</p>`;
-  const button = $("#confirmOk");
+  const button = prepareConfirmAction("confirm-accept-action");
   button.textContent = "确认采纳";
-  button.disabled = false;
-  button.classList.remove("danger");
-  button.classList.add("confirm-accept-action");
   dialog.addEventListener(
     "close",
-    () => {
-      button.disabled = false;
-      button.classList.remove("confirm-accept-action");
-      button.classList.add("danger");
-    },
+    () => prepareConfirmAction(),
     { once: true },
   );
   button.onclick = async () => {
@@ -732,7 +728,7 @@ function addProfileResetButtons() {
     button.type = "button";
     button.className = "field-reset";
     button.innerHTML =
-      `<svg viewBox="0 0 1024 1024" aria-hidden="true"><use transform="translate(1024 0) scale(-1 1)" href="${ICONS_URL}#motion-reset"></use></svg>`;
+      `<svg viewBox="0 0 1024 1024" aria-hidden="true"><use transform="translate(1024 0) scale(-1 1)" href="#motion-reset"></use></svg>`;
     button.title = "恢复基础模式默认值";
     button.setAttribute("aria-label", button.title);
     label.classList.add("field-reset-label");
