@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 from .capture_variants import (
     active_variant_groups,
     active_variant_photo_ids,
+    active_variant_rows,
     variant_metadata,
 )
 from .classification import project_photo_counts
@@ -234,6 +236,193 @@ def clear_decisions(project: Project) -> int:
         return cursor.rowcount
 
 
+def _expand_batch_assignments(
+    conn: Any,
+    seeds: Iterable[tuple[int, str]],
+    sync_variant_decisions: bool,
+    *,
+    readable_only: bool,
+) -> tuple[dict[int, str], int]:
+    """Expand batch decisions without overwriting a conflicting decision."""
+    requested: dict[int, str] = {}
+    for photo_id, decision in seeds:
+        requested[int(photo_id)] = decision
+    if not requested:
+        return {}, 0
+
+    readable_clause = (
+        " AND COALESCE(error,'')=''"
+        " AND COALESCE(suggestion,'keep')<>'unreadable'"
+        if readable_only
+        else ""
+    )
+    eligible = {
+        int(row["id"])
+        for row in conn.execute(
+            f"""SELECT id FROM photos
+                WHERE status='active' AND decision='' {readable_clause}"""
+        )
+    }
+    if not sync_variant_decisions:
+        return (
+            {
+                photo_id: decision
+                for photo_id, decision in requested.items()
+                if photo_id in eligible
+            },
+            0,
+        )
+
+    memberships, groups = active_variant_groups(conn)
+    direct: dict[int, str] = {}
+    group_decisions: dict[int, str] = {}
+    conflicting_groups: set[int] = set()
+    for photo_id, decision in requested.items():
+        representative_id = memberships.get(photo_id)
+        if representative_id is None:
+            direct[photo_id] = decision
+            continue
+        if representative_id in conflicting_groups:
+            continue
+        previous = group_decisions.get(representative_id)
+        if previous is not None and previous != decision:
+            conflicting_groups.add(representative_id)
+        else:
+            group_decisions[representative_id] = decision
+
+    assignments = {
+        photo_id: decision
+        for photo_id, decision in direct.items()
+        if photo_id in eligible
+    }
+    for representative_id, decision in group_decisions.items():
+        if representative_id in conflicting_groups:
+            continue
+        members = groups.get(representative_id, [])
+        if any(
+            str(member["decision"] or "") not in {"", decision}
+            for member in members
+        ):
+            conflicting_groups.add(representative_id)
+            continue
+        assignments.update(
+            (
+                int(member["photo_id"]),
+                decision,
+            )
+            for member in members
+            if int(member["photo_id"]) in eligible
+        )
+    return assignments, len(conflicting_groups)
+
+
+def _similarity_seeds(
+    conn: Any,
+    groups: Iterable[dict[str, Any]],
+) -> list[tuple[int, str]]:
+    groups = list(groups)
+    variants = active_variant_rows(
+        conn,
+        (
+            int(row["id"])
+            for group in groups
+            if group.get("kind") == "similar"
+            for row in group.get("members", [])
+        ),
+    )
+    seeds: list[tuple[int, str]] = []
+    for group in groups:
+        members = list(group.get("members", []))
+        by_id = {int(row["id"]): row for row in members}
+        recommended_id = int(group["recommended_id"])
+        priority = [
+            recommended_id,
+            *[
+                int(row["id"])
+                for row in members
+                if int(row["id"]) != recommended_id
+            ],
+        ]
+        group_variants = variants if group.get("kind") == "similar" else {}
+        owners: dict[int, int] = {}
+        for source_id in priority:
+            for row in group_variants.get(source_id) or [by_id[source_id]]:
+                owners.setdefault(int(row["id"]), source_id)
+        for source_id in priority:
+            for row in group_variants.get(source_id) or [by_id[source_id]]:
+                photo_id = int(row["id"])
+                if owners.get(photo_id) != source_id:
+                    continue
+                seeds.append(
+                    (photo_id, "keep" if source_id == recommended_id else "remove")
+                )
+    return seeds
+
+
+def accept_decisions(
+    project: Project,
+    scope: str,
+    remove_review_on_accept: bool = False,
+    sync_variant_decisions: bool = True,
+    *,
+    similarity_groups: Iterable[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Accept pending suggestions or similarity recommendations in one batch."""
+    if scope not in {"library", "undecided", "ai", "similar"}:
+        raise ValueError("scope 必须是 library、undecided、ai 或 similar")
+    with closing(connect_db(project.db_path)) as conn:
+        if scope == "similar":
+            if similarity_groups is None:
+                raise ValueError("相似照片组不存在或已发生变化")
+            seeds = _similarity_seeds(conn, similarity_groups)
+        else:
+            where = [
+                "status='active'",
+                "COALESCE(error,'')=''",
+                "COALESCE(suggestion,'keep')<>'unreadable'",
+                "decision=''",
+            ]
+            if scope == "ai":
+                where.append("suggestion IN ('remove','review')")
+            rows = conn.execute(
+                f"SELECT id,suggestion FROM photos WHERE {' AND '.join(where)}",
+            ).fetchall()
+            seeds = [
+                (
+                    int(row["id"]),
+                    "remove" if row["suggestion"] in {"remove", "review"} else "keep",
+                )
+                for row in rows
+                if row["suggestion"] != "review" or remove_review_on_accept
+            ]
+
+        assignments, skipped = _expand_batch_assignments(
+            conn,
+            seeds,
+            sync_variant_decisions,
+            readable_only=True,
+        )
+        conn.executemany(
+            """UPDATE photos SET decision=?
+                WHERE id=? AND status='active' AND decision=''""",
+            [
+                (decision, photo_id)
+                for photo_id, decision in sorted(assignments.items())
+            ],
+        )
+        conn.commit()
+        counts = project_photo_counts(conn)
+    kept = sum(decision == "keep" for decision in assignments.values())
+    removed = sum(decision == "remove" for decision in assignments.values())
+    return {
+        "marked": kept + removed,
+        "kept": kept,
+        "removed": removed,
+        "skipped_conflicting_groups": skipped,
+        "project_counts": counts,
+    }
+
+
 def mark_ai_remove_suggestions(
     project: Project,
     sync_variant_decisions: bool = False,
@@ -249,27 +438,12 @@ def mark_ai_remove_suggestions(
                       AND suggestion='remove' AND decision=''"""
             )
         ]
-        memberships, groups = active_variant_groups(conn)
-        assignments: set[int] = set()
-        skipped_groups: set[int] = set()
-        handled_groups: set[int] = set()
-        for photo_id in source_ids:
-            representative_id = memberships.get(photo_id)
-            if not sync_variant_decisions or representative_id is None:
-                assignments.add(photo_id)
-                continue
-            if representative_id in handled_groups:
-                continue
-            handled_groups.add(representative_id)
-            members = groups.get(representative_id, [])
-            if any(str(member["decision"] or "") == "keep" for member in members):
-                skipped_groups.add(representative_id)
-                continue
-            assignments.update(
-                int(member["photo_id"])
-                for member in members
-                if not str(member["decision"] or "")
-            )
+        assignments, skipped_groups = _expand_batch_assignments(
+            conn,
+            ((photo_id, "remove") for photo_id in source_ids),
+            sync_variant_decisions,
+            readable_only=False,
+        )
         conn.executemany(
             """UPDATE photos SET decision='remove'
                 WHERE id=? AND status='active' AND decision=''""",
@@ -279,7 +453,7 @@ def mark_ai_remove_suggestions(
     result = {
         "marked": len(assignments),
         "source_candidates": len(source_ids),
-        "skipped_kept_groups": len(skipped_groups),
+        "skipped_kept_groups": skipped_groups,
     }
     return result if detailed or sync_variant_decisions else result["marked"]
 
@@ -287,6 +461,7 @@ def mark_ai_remove_suggestions(
 __all__ = [
     "DecisionUpdate",
     "clear_decisions",
+    "accept_decisions",
     "export_decisions",
     "import_decisions",
     "mark_ai_remove_suggestions",

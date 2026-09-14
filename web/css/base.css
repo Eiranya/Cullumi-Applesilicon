@@ -79,8 +79,8 @@ select:focus-visible {
 }
 
 #scanBtn {
-  background:var(--pink);
-  color:#fff;
+  background:var(--card);
+  color:var(--pink);
   border-color:var(--pink)
 }
 
@@ -280,7 +280,7 @@ nav button.active em {
   display:flex;
   align-items:center;
   justify-content:space-between;
-  gap:10px;
+  gap:8px;
   margin-bottom:18px;
   padding-right:40px;
   padding-left:40px;

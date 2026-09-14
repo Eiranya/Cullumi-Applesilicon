@@ -197,7 +197,13 @@ class CullumiTests(unittest.TestCase):
         scanner.reclassify.assert_not_called()
 
     def test_heif_phone_variants_use_tolerant_decoder(self):
+        from pillow_heif import libheif_info
+
         self.assertIsNotNone(open_heif)
+        libheif_version = tuple(
+            int(part) for part in libheif_info()["libheif"].split(".")[:3]
+        )
+        self.assertGreaterEqual(libheif_version, (1, 23, 2))
         self.assertTrue({".heic", ".heics", ".heif", ".heifs", ".hif"} <= HEIF_EXTENSIONS)
         path = self.photos / "phone.heic"
         Image.new("RGB", (64, 48), (30, 80, 120)).save(path, "HEIF", quality=80)

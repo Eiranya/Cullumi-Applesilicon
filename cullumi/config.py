@@ -207,6 +207,7 @@ def _normalize_simple_settings(
     for key in (
         "fast_analysis",
         "auto_advance",
+        "remove_review_on_accept",
         "auto_check_updates",
         "blink_detection_enabled",
         "niqe_analysis_enabled",
@@ -370,6 +371,7 @@ class ConfigStore:
             "version": 1,
             "default_cache_root": str(default_cache),
             "auto_advance": True,
+            "remove_review_on_accept": False,
             "fast_analysis": False,
             "auto_check_updates": True,
             "blink_detection_enabled": True,

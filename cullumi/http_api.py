@@ -24,6 +24,7 @@ from .capture_variants import (
 from .classification import project_photo_counts
 from .config import ConfigStore, profile_blink_enabled
 from .decision_service import (
+    accept_decisions,
     clear_decisions,
     export_decisions,
     import_decisions,
@@ -109,6 +110,7 @@ POST_ROUTES = {
     "/api/scan/cancel": "api_scan_cancel",
     "/api/decision": "api_decision",
     "/api/decision/ai-remove": "api_decision_ai_remove",
+    "/api/decision/accept": "api_decision_accept",
     "/api/decision/clear": "api_decision_clear",
     "/api/motion/cover": "api_motion_cover",
     "/api/motion/locate": "api_motion_locate",
@@ -577,6 +579,9 @@ class Handler(BaseHTTPRequestHandler):
                 "default_cache_root": config_data["default_cache_root"],
                 "auto_advance": config_data.get("auto_advance", True),
                 "fast_analysis": config_data.get("fast_analysis", False),
+                "remove_review_on_accept": config_data.get(
+                    "remove_review_on_accept", False
+                ),
                 "auto_check_updates": config_data.get("auto_check_updates", True),
                 "motion_cover_writeback": config_data.get(
                     "motion_cover_writeback", "ask"
@@ -846,6 +851,47 @@ class Handler(BaseHTTPRequestHandler):
             with closing(connect_db(project.db_path)) as conn:
                 counts = project_photo_counts(conn)
         self._send_json({"cleared": result, "project_counts": counts})
+
+    def api_decision_accept(self, body: dict[str, Any]) -> None:
+        project_id = str(body["project_id"])
+        scope = str(body["scope"])
+        settings = self.config.snapshot()
+        sync_variants = bool(settings.get("sync_variant_decisions", True))
+        remove_review = bool(settings.get("remove_review_on_accept", False))
+        with self.manager.data_operation(project_id):
+            project = self.manager.from_id(project_id)
+            groups = None
+            if scope == "similar":
+                profile = self.config.get_profile(project.profile_id)
+                blink_enabled = profile_blink_enabled(profile)
+                with closing(connect_db(project.db_path)) as conn:
+                    group_id = str(body.get("group_id") or "")
+                    if group_id:
+                        group = self.similarity_groups.get_one(
+                            project_id,
+                            group_id,
+                            conn,
+                            profile,
+                            blink_enabled,
+                        )
+                        if group is None:
+                            raise ValueError("相似照片组不存在或已发生变化")
+                        groups = [group]
+                    else:
+                        groups = self.similarity_groups.get(
+                            project_id,
+                            conn,
+                            profile,
+                            blink_enabled,
+                        )
+            result = accept_decisions(
+                project,
+                scope,
+                remove_review,
+                sync_variants,
+                similarity_groups=groups,
+            )
+        self._send_json(result)
 
     def api_decision_ai_remove(self, body: dict[str, Any]) -> None:
         project_id = body["project_id"]

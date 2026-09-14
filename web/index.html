@@ -87,19 +87,14 @@
         <div class="toolbar">
           <div><h2 id="viewTitle">照片库</h2><span id="viewSubtitle"></span></div>
           <div id="libraryFilters" class="library-filters"></div>
-          <div id="aiBatchAction" class="ai-batch-action hidden">
-            <button id="markAiRemoveBtn" class="ai-sweep-button" type="button" aria-label="将所有建议移除的未决定照片标记为移除" title="仅标记为移除，不会立即移动照片文件">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14M9 7V5h6v2M8 10v7M12 10v7M16 10v7M7 7l1 13h8l1-13"/></svg>
-              <span>一键移除</span>
-              <em id="aiRemovePendingCount">0</em>
-            </button>
-          </div>
           <div id="similarViewActions" class="similar-toolbar-actions hidden">
             <button id="similarCollapseBtn" class="ghost" aria-label="收回" title="收回"><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="/static/assets/icons.svg?v=__ASSET_REVISION__#similar-back"></use></svg></button>
-            <button id="similarExpandBtn" class="ghost" aria-label="展开" title="展开"><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="/static/assets/icons.svg?v=__ASSET_REVISION__#similar-open"></use></svg></button>
             <button id="similarBackBtn" class="ghost hidden" aria-label="返回相似组" title="返回相似组"><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="/static/assets/icons.svg?v=__ASSET_REVISION__#similar-back"></use></svg></button>
+            <button id="similarExpandBtn" class="ghost" aria-label="展开" title="展开"><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="/static/assets/icons.svg?v=__ASSET_REVISION__#similar-open"></use></svg></button>
+            <button id="similarCloseBtn" class="ghost hidden" aria-label="收起" title="收起"><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="/static/assets/icons.svg?v=__ASSET_REVISION__#similar-close"></use></svg></button>
             <div id="similarTools" class="gallery-tools-host"></div>
           </div>
+          <button id="acceptSuggestionsBtn" class="batch-accept-button hidden" type="button" title="采纳当前页面的推荐决定"><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="/static/assets/icons.svg?v=__ASSET_REVISION__#decision-confirm"></use></svg>一键采纳</button>
           <label class="search"><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="/static/assets/icons.svg?v=__ASSET_REVISION__#box-search"></use></svg><input id="searchInput" placeholder="搜索照片"></label>
         </div>
         <div id="gallery" class="gallery"></div>
@@ -179,6 +174,10 @@
               <div class="settings-row">
                 <div class="setting-copy"><label for="autoAdvance">标记后下一张</label></div>
                 <label class="setting-switch" aria-label="标记后自动下一张"><input id="autoAdvance" type="checkbox"><span aria-hidden="true"></span></label>
+              </div>
+              <div class="settings-row">
+                <div class="setting-copy"><label for="removeReviewOnAccept">一键采纳时移除人工复查</label></div>
+                <label class="setting-switch" aria-label="一键采纳时移除人工复查"><input id="removeReviewOnAccept" type="checkbox"><span aria-hidden="true"></span></label>
               </div>
               <div class="settings-row">
                 <div class="setting-copy"><label for="syncVariantDecisions">相同照片同时决定</label><small>同目录、同名的 RAW 与其他图片格式会同步保留或移除，已有决定不会自动改写。</small></div>

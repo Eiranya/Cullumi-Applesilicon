@@ -90,6 +90,7 @@ async function boot() {
   $("#appVersion").textContent = `v${b.version}`;
   renderProfiles();
   $("#autoAdvance").checked = !!b.settings.auto_advance;
+  $("#removeReviewOnAccept").checked = !!b.settings.remove_review_on_accept;
   $("#fastAnalysis").checked = !!b.settings.fast_analysis;
   $("#syncVariantDecisions").checked =
     b.settings.sync_variant_decisions !== false;
@@ -187,9 +188,6 @@ function updateCounts(p) {
   $("#keepCount").textContent = c.keep ?? p.decisions?.keep ?? 0;
   $("#removeCount").textContent = c.remove ?? p.decisions?.remove ?? 0;
   $("#unreadableCount").textContent = c.unreadable ?? p.counts?.unreadable ?? 0;
-  const aiRemovePending = c.ai_remove_pending ?? 0;
-  $("#aiRemovePendingCount").textContent = aiRemovePending;
-  $("#markAiRemoveBtn").disabled = !aiRemovePending;
   $("#pairCount").textContent = p.similar_groups ?? p.pairs;
   $("#clearDecisionsBtn").disabled = !Object.values(p.decisions || {}).reduce(
     (sum, count) => sum + count,

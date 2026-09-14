@@ -27,6 +27,7 @@ def save_settings(config: ConfigStore, body: dict[str, Any]) -> dict[str, Any]:
     for key in (
         "fast_analysis",
         "auto_advance",
+        "remove_review_on_accept",
         "auto_check_updates",
         "sync_variant_decisions",
     ):

@@ -3,6 +3,7 @@
 import shutil
 
 from .decision_service import (
+    accept_decisions,
     clear_decisions,
     export_decisions,
     import_decisions,
@@ -18,6 +19,7 @@ from .quarantine_service import (
 
 __all__ = [
     "QUARANTINE_DIR",
+    "accept_decisions",
     "apply_quarantine",
     "clear_decisions",
     "export_decisions",

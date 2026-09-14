@@ -52,66 +52,32 @@
   align-items: center;
   gap: 8px;
   margin-left: auto;
-  margin-right: 12px;
+  margin-right: 0;
 }
 .gallery-tools-host {
   display: contents;
 }
 
-.ai-batch-action {
+.batch-accept-button {
   flex: 0 0 auto;
-  margin-right: 2px;
-}
-
-.ai-sweep-button {
   height: 42px;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 10px;
-  border-color: color-mix(in srgb, var(--red) 58%, var(--line));
-  color: var(--red);
-  background: color-mix(in srgb, var(--red) 7%, var(--card));
-}
-
-.ai-sweep-button svg {
-  width: 17px;
-  height: 17px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.7;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.ai-sweep-button span {
-  color: inherit;
-  font-weight: 700;
+  background: var(--pink);
+  color: #fff;
+  border-color: var(--pink);
   white-space: nowrap;
 }
 
-.ai-sweep-button em {
-  min-width: 24px;
-  padding: 2px 6px;
-  border-radius: 999px;
-  color: #fff;
-  background: var(--red);
-  font: 700 10px/1.4 var(--utility-font);
-  font-style: normal;
-  text-align: center;
+.batch-accept-button svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
 }
 
-.toolbar button.ai-sweep-button:hover:not(:disabled) {
-  border-color:#8f3730;
-  color:#7d302a;
-  background:color-mix(in srgb,var(--red) 22%,var(--card));
-  transform:none;
-  box-shadow:none;
-}
-
-.toolbar button.ai-sweep-button:hover:not(:disabled) em {
-  color:#fff;
-  background:#8f3730;
+body.similar-view-open:not(.similar-detail-open) .batch-accept-button {
+  margin-left: auto;
 }
 
 .multi-filter {
@@ -389,10 +355,10 @@
   display:flex;
   align-items:center;
   justify-content:center;
-  border:2px solid color-mix(in srgb,var(--pink) 30%,var(--line));
+  border:1px solid var(--pink);
   border-radius:50%;
   background:color-mix(in srgb,var(--card) 94%,transparent);
-  color:var(--ink);
+  color:var(--pink);
   box-shadow:0 5px 15px rgba(67,37,45,.18);
   opacity:0;
   visibility:hidden;
@@ -589,6 +555,13 @@ button.primary:hover:not(:disabled),
 }
 
 #scanBtn:hover:not(:disabled) {
+  color: var(--pink-hover);
+  border-color: var(--pink-hover);
+  background: var(--surface-hover);
+}
+
+.toolbar .batch-accept-button:hover:not(:disabled) {
+  color: #fff;
   border-color: var(--pink-hover);
   background: var(--pink-hover);
 }
@@ -733,7 +706,7 @@ nav button:hover:not(:disabled),
   align-items: center;
   gap: 8px;
   margin-left: auto;
-  margin-right: 12px;
+  margin-right: 0;
 }
 
 .similar-toolbar-actions > button {

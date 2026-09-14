@@ -405,6 +405,140 @@ class CaptureVariantTests(unittest.TestCase):
             }
         self.assertEqual(decisions, {jpg: "remove", raw: "remove"})
 
+    def test_accept_library_respects_review_setting(self) -> None:
+        with closing(connect_db(self.project.db_path)) as conn:
+            remove = insert_photo(conn, "IMG_0400.JPG", suggestion="remove")
+            review = insert_photo(conn, "IMG_0401.JPG", suggestion="review")
+            keep = insert_photo(conn, "IMG_0402.JPG", suggestion="keep")
+            conn.commit()
+
+        handler = object.__new__(http_api.Handler)
+        handler._send_json = mock.Mock()
+        with mock.patch.object(http_api, "APPLICATION", self.application()):
+            handler.api_decision_accept(
+                {"project_id": self.project.project_id, "scope": "library"}
+            )
+        result = handler._send_json.call_args.args[0]
+        self.assertEqual(result["marked"], 2)
+        self.assertEqual(result["kept"], 1)
+        self.assertEqual(result["removed"], 1)
+        with closing(connect_db(self.project.db_path)) as conn:
+            decisions = {
+                int(row["id"]): row["decision"]
+                for row in conn.execute("SELECT id,decision FROM photos")
+            }
+        self.assertEqual(
+            decisions,
+            {remove: "remove", review: "", keep: "keep"},
+        )
+
+        with self.config.edit() as data:
+            data["remove_review_on_accept"] = True
+        handler._send_json.reset_mock()
+        with mock.patch.object(http_api, "APPLICATION", self.application()):
+            handler.api_decision_accept(
+                {"project_id": self.project.project_id, "scope": "undecided"}
+            )
+        result = handler._send_json.call_args.args[0]
+        self.assertEqual(result["marked"], 1)
+        self.assertEqual(result["kept"], 0)
+        self.assertEqual(result["removed"], 1)
+        with closing(connect_db(self.project.db_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT decision FROM photos WHERE id=?", (review,)
+                ).fetchone()[0],
+                "remove",
+            )
+
+    def test_accept_similar_assigns_variants_and_protects_conflicts(self) -> None:
+        with closing(connect_db(self.project.db_path)) as conn:
+            recommended = insert_photo(
+                conn, "IMG_0500.JPG", taken="2026:01:01 12:00:00"
+            )
+            recommended_raw = insert_photo(
+                conn,
+                "IMG_0500.CR3",
+                size=20_000_000,
+                taken="2026:01:01 12:00:00",
+            )
+            other = insert_photo(
+                conn, "IMG_0501.JPG", taken="2026:01:01 12:00:01"
+            )
+            other_raw = insert_photo(
+                conn,
+                "IMG_0501.CR3",
+                size=20_000_000,
+                taken="2026:01:01 12:00:01",
+            )
+            rebuild_capture_variants(conn)
+            conn.execute(
+                """INSERT INTO similar_pairs(
+                     a_id,b_id,score,kind,recommended_id,face_safe
+                   ) VALUES(?,?,?,?,?,?)""",
+                (recommended, other, 0.95, "similar", recommended, 0),
+            )
+            conn.execute("UPDATE photos SET decision='keep' WHERE id=?", (other,))
+            conn.commit()
+
+        application = self.application()
+        with closing(connect_db(self.project.db_path)) as conn:
+            group = application.similarity_groups.get(
+                self.project.project_id,
+                conn,
+                self.config.get_profile(self.project.profile_id),
+            )[0]
+        handler = object.__new__(http_api.Handler)
+        handler._send_json = mock.Mock()
+        with mock.patch.object(http_api, "APPLICATION", application):
+            handler.api_decision_accept(
+                {
+                    "project_id": self.project.project_id,
+                    "scope": "similar",
+                    "group_id": group["id"],
+                }
+            )
+        result = handler._send_json.call_args.args[0]
+        self.assertEqual(result["skipped_conflicting_groups"], 1)
+        self.assertEqual(result["kept"], 2)
+        with closing(connect_db(self.project.db_path)) as conn:
+            decisions = {
+                int(row["id"]): row["decision"]
+                for row in conn.execute("SELECT id,decision FROM photos")
+            }
+        self.assertEqual(
+            decisions,
+            {
+                recommended: "keep",
+                recommended_raw: "keep",
+                other: "keep",
+                other_raw: "",
+            },
+        )
+
+        with closing(connect_db(self.project.db_path)) as conn:
+            conn.execute("UPDATE photos SET decision='' WHERE id=?", (other,))
+            conn.commit()
+        handler._send_json.reset_mock()
+        with mock.patch.object(http_api, "APPLICATION", application):
+            handler.api_decision_accept(
+                {
+                    "project_id": self.project.project_id,
+                    "scope": "similar",
+                    "group_id": group["id"],
+                }
+            )
+        result = handler._send_json.call_args.args[0]
+        self.assertEqual(result["removed"], 2)
+        with closing(connect_db(self.project.db_path)) as conn:
+            self.assertEqual(
+                {
+                    row["decision"]
+                    for row in conn.execute("SELECT decision FROM photos")
+                },
+                {"keep", "remove"},
+            )
+
     def test_csv_variant_conflict_requires_disabling_sync_before_writes(self) -> None:
         with closing(connect_db(self.project.db_path)) as conn:
             jpg = insert_photo(conn, "IMG_0200.JPG")

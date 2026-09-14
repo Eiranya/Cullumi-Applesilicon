@@ -74,30 +74,6 @@
   background: var(--surface-hover);
 }
 
-[data-theme="night"] .ai-sweep-button {
-  border-color:#7f4540;
-  color:#ff948b;
-  background:#352321
-}
-
-[data-theme="night"] .ai-sweep-button em {
-  color:#211816;
-  background:#ff948b
-}
-
-[data-theme="night"] .toolbar button.ai-sweep-button:hover:not(:disabled) {
-  border-color:var(--remove-hover);
-  color:#ffd0cc;
-  background:#6a3531;
-  transform:none;
-  box-shadow:none
-}
-
-[data-theme="night"] .toolbar button.ai-sweep-button:hover:not(:disabled) em {
-  color:#321b19;
-  background:#ffc0bb
-}
-
 [data-theme="night"] #settingsBtn {
   background: var(--card);
 }
@@ -151,6 +127,12 @@
 }
 
 [data-theme="night"] #scanBtn {
+  color: var(--pink);
+  background: var(--card);
+  border-color: var(--pink);
+}
+
+[data-theme="night"] .batch-accept-button {
   color: #fff;
   background: var(--pink);
   border-color: var(--pink);
@@ -176,8 +158,19 @@
   border-color:var(--keep-hover)
 }
 
-[data-theme="night"] #scanBtn:hover:not(:disabled),
 [data-theme="night"] #chooseBtn:hover:not(:disabled) {
+  background: var(--pink-hover);
+  border-color: var(--pink-hover);
+}
+
+[data-theme="night"] #scanBtn:hover:not(:disabled) {
+  color: var(--pink-hover);
+  background: var(--surface-hover);
+  border-color: var(--pink-hover);
+}
+
+[data-theme="night"] .toolbar .batch-accept-button:hover:not(:disabled) {
+  color: #fff;
   background: var(--pink-hover);
   border-color: var(--pink-hover);
 }
@@ -301,4 +294,3 @@
   background: #432522;
   border-color: #7d3b36;
 }
-

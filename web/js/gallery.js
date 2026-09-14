@@ -289,9 +289,13 @@ async function loadView() {
           state.view
         ];
   $("#libraryFilters").classList.toggle("hidden", state.view !== "library");
-  $("#aiBatchAction").classList.toggle(
+  $("#acceptSuggestionsBtn").classList.toggle(
     "hidden",
-    state.view !== "library" || state.activeNav !== "ai",
+    !(
+      state.view === "similar" ||
+      (state.view === "library" &&
+        ["library", "ai", "undecided"].includes(state.activeNav))
+    ),
   );
   $("#gallery").classList.toggle("hidden", state.view === "similar");
   $("#similarBrowser").classList.toggle("hidden", state.view !== "similar");
@@ -561,6 +565,15 @@ async function setDecision(id, decision, fromViewer = true) {
     await syncViewerDecisions();
     return;
   }
+  if (
+    state.view === "similar" &&
+    state.settings.auto_advance &&
+    state.similar.mode !== "expanded" &&
+    similarGroupComplete()
+  ) {
+    await advanceSimilarGroup(fromViewer && $("#viewer").open);
+    return true;
+  }
   const p = state.items.find((item) => item.id === id);
   if (fromViewer && state.settings.auto_advance)
     moveViewerPastAffected(affectedIds);
@@ -714,7 +727,7 @@ function bindGalleryEvents() {
   };
   $("#quarantineBtn").onclick = quarantine;
   $("#clearDecisionsBtn").onclick = confirmClearDecisions;
-  $("#markAiRemoveBtn").onclick = confirmAiRemoveSuggestions;
+  $("#acceptSuggestionsBtn").onclick = confirmAcceptSuggestions;
   const main = document.querySelector("body > main");
   main.addEventListener("scroll", scheduleLibraryBackToTopUpdate, {
     passive: true,

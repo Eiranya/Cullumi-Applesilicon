@@ -109,6 +109,7 @@ class SettingsServiceTests(unittest.TestCase):
                     "default_cache_root": str(cache),
                     "theme": "night",
                     "auto_advance": False,
+                    "remove_review_on_accept": True,
                 },
             )
 
@@ -116,6 +117,7 @@ class SettingsServiceTests(unittest.TestCase):
             self.assertEqual(saved["default_cache_root"], str(cache.resolve()))
             self.assertEqual(saved["theme"], "night")
             self.assertFalse(saved["auto_advance"])
+            self.assertTrue(saved["remove_review_on_accept"])
             self.assertTrue(
                 config.get_profile("balanced")["quality"]["enabled"]["niqe"]
             )

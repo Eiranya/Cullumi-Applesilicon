@@ -139,7 +139,7 @@ class WebResourceContractTests(unittest.TestCase):
         for function in (
             "confirmDeleteProfile",
             "confirmClearDecisions",
-            "confirmAiRemoveSuggestions",
+            "confirmAcceptSuggestions",
             "quarantine",
         ):
             self.assertIn(f"function {function}(", scripts)

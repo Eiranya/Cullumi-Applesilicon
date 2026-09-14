@@ -102,10 +102,11 @@ async function installApi(page, options = {}) {
   let decision = "";
   let writebackMode = options.writebackMode || "never";
   let syncVariantDecisions = options.syncVariantDecisions ?? true;
+  let removeReviewOnAccept = options.removeReviewOnAccept ?? false;
   const decisions = new Map();
   const requests = [];
   const similarPhoto = id => {
-    const photo = photoPayload("", id);
+    const photo = photoPayload(decisions.get(id) || "", id);
     photo.size = id * 10_000;
     photo.taken = `2026-08-${String((id % 28) + 1).padStart(2, "0")} 10:00:00`;
     if (options.similarQualityScores?.[id] !== undefined)
@@ -136,10 +137,11 @@ async function installApi(page, options = {}) {
       });
     return photo;
   };
-  const similarMembers = () => {
+  const similarMembers = (groupIndex = 1) => {
+    const start = (groupIndex - 1) * (options.similarMemberCount || 2);
     const sources = Array.from(
       { length: options.similarMemberCount || 2 },
-      (_, index) => similarPhoto(index + 1),
+      (_, index) => similarPhoto(start + index + 1),
     );
     if (!options.similarVariantPairs) return sources;
     return sources.flatMap((source, index) => {
@@ -182,6 +184,7 @@ async function installApi(page, options = {}) {
         settings: {
           theme: "day",
           auto_advance: options.autoAdvance ?? false,
+          remove_review_on_accept: removeReviewOnAccept,
           fast_analysis: options.fastAnalysis ?? false,
           auto_check_updates: false,
           sync_variant_decisions: syncVariantDecisions,
@@ -259,6 +262,29 @@ async function installApi(page, options = {}) {
         project_counts: projectPayload(decision, options.photoCount || 2, decisions),
       });
     }
+    if (url.pathname === "/api/decision/accept") {
+      const targets = [];
+      if (body.scope === "similar") {
+        const groups = body.group_id
+          ? [Number(body.group_id.split("-").pop())]
+          : Array.from({ length: options.similarGroupCount || 1 }, (_, index) => index + 1);
+        groups.forEach(groupIndex => {
+          similarMembers(groupIndex).forEach(photo => {
+            const recommended = (photo.similarity_source_id || photo.id) ===
+              (groupIndex - 1) * (options.similarMemberCount || 2) + 1;
+            decisions.set(photo.id, recommended ? "keep" : "remove");
+            targets.push(recommended ? "keep" : "remove");
+          });
+        });
+      }
+      return fulfill({
+        marked: targets.length,
+        kept: targets.filter(value => value === "keep").length,
+        removed: targets.filter(value => value === "remove").length,
+        skipped_conflicting_groups: 0,
+        project_counts: projectPayload("", options.photoCount || 2, decisions),
+      });
+    }
     if (url.pathname === "/api/motion/cover") {
       const photo = motionPhotoPayload(decisions.get(body.photo_id) || "", body.photo_id, options.motionStillTime || 0);
       photo.motion.cover_source = body.source;
@@ -283,7 +309,8 @@ async function installApi(page, options = {}) {
     if (url.pathname === "/api/settings") {
       if (body.motion_cover_writeback) writebackMode = body.motion_cover_writeback;
       if (typeof body.sync_variant_decisions === "boolean") syncVariantDecisions = body.sync_variant_decisions;
-      return fulfill({ saved: true, settings: { theme: body.theme || "day", motion_cover_writeback: writebackMode, sync_variant_decisions: syncVariantDecisions } });
+      if (typeof body.remove_review_on_accept === "boolean") removeReviewOnAccept = body.remove_review_on_accept;
+      return fulfill({ saved: true, settings: { theme: body.theme || "day", motion_cover_writeback: writebackMode, sync_variant_decisions: syncVariantDecisions, remove_review_on_accept: removeReviewOnAccept } });
     }
     if (url.pathname === "/api/update/check") {
       return fulfill(options.updateRelease || {
@@ -383,32 +410,39 @@ async function installApi(page, options = {}) {
         );
         return fulfill({ total, items });
       }
-      const sources = Array.from(
-        { length: options.similarMemberCount || 2 },
-        (_, index) => similarPhoto(index + 1),
-      );
-      return fulfill({
-        total: 1,
-        items: [{
-          id: "similar-1",
-          count: options.similarVariantPairs ? 4 : sources.length,
+      const groupCount = options.similarGroupCount || 1;
+      const memberCount = options.similarMemberCount || 2;
+      const items = Array.from({ length: groupCount }, (_, groupOffset) => {
+        const sources = Array.from(
+          { length: memberCount },
+          (_, index) => similarPhoto(groupOffset * memberCount + index + 1),
+        );
+        return {
+          id: `similar-${groupOffset + 1}`,
+          count: options.similarVariantPairs ? sources.length * 2 : sources.length,
           capture_count: sources.length,
           kind: "similar",
           face_safe: false,
           recommended: sources[0],
           covers: sources,
-        }],
+        };
+      });
+      return fulfill({
+        total: groupCount,
+        items,
       });
     }
     if (url.pathname === "/api/similar-group") {
-      const members = similarMembers();
+      const groupIndex = Number(url.searchParams.get("group_id")?.split("-").pop()) || 1;
+      const memberCount = options.similarMemberCount || 2;
+      const members = similarMembers(groupIndex);
       return fulfill({
-        id: "similar-1",
+        id: `similar-${groupIndex}`,
         count: members.length,
-        capture_count: options.similarMemberCount || 2,
+        capture_count: memberCount,
         kind: "similar",
         face_safe: false,
-        recommended_id: 1,
+        recommended_id: (groupIndex - 1) * memberCount + 1,
         members: members.map(photo => ({
           ...photo,
           group_similarity:
@@ -754,7 +788,7 @@ test("智能建议工具栏按内容区宽度分行且标题保持单行", async
       heading: box(":scope > div:first-child"),
       title: box("#viewTitle"),
       filters: box("#libraryFilters"),
-      action: box("#aiBatchAction"),
+      action: box("#acceptSuggestionsBtn"),
       search: box(".search"),
     };
   });
@@ -772,9 +806,140 @@ test("智能建议工具栏按内容区宽度分行且标题保持单行", async
   expect(narrow.search.right).toBeLessThanOrEqual(narrow.toolbar.right);
 });
 
+test("一键采纳显示在指定页面并提交当前范围", async ({ page }) => {
+  const requests = await openApp(page);
+  await openProject(page);
+  const accept = page.locator("#acceptSuggestionsBtn");
+  await expect(accept).toBeVisible();
+  await expect(accept).toHaveText("一键采纳");
+  expect(await accept.evaluate(button => button.nextElementSibling?.classList.contains("search"))).toBe(true);
+
+  await accept.click();
+  await page.locator("#confirmOk").click();
+  await expect.poll(() => requests.some(request =>
+    request.path === "/api/decision/accept" && request.body?.scope === "library",
+  )).toBe(true);
+
+  await page.locator('[data-nav="keep"]').click();
+  await expect(accept).toBeHidden();
+  await page.locator('[data-nav="ai"]').click();
+  await expect(accept).toBeVisible();
+  await page.locator('[data-nav="undecided"]').click();
+  await expect(accept).toBeVisible();
+
+  await page.locator('[data-nav="similar"]').click();
+  await expect(accept).toBeVisible();
+  await accept.click();
+  await page.locator("#confirmOk").click();
+  await expect.poll(() => requests.some(request =>
+    request.path === "/api/decision/accept" &&
+    request.body?.scope === "similar" && !request.body?.group_id,
+  )).toBe(true);
+
+  await page.locator('[data-similar-group="similar-1"]').click();
+  await expect(accept).toBeVisible();
+  await accept.click();
+  await page.locator("#confirmOk").click();
+  await expect.poll(() => requests.some(request =>
+    request.path === "/api/decision/accept" && request.body?.group_id === "similar-1",
+  )).toBe(true);
+});
+
+test("一键采纳图标、工具栏间距与扫描按钮主题样式正确", async ({ page }) => {
+  await openApp(page);
+  await openProject(page);
+
+  const accept = page.locator("#acceptSuggestionsBtn");
+  await expect(accept.locator("svg use")).toHaveAttribute(
+    "href",
+    iconHref("decision-confirm"),
+  );
+  const gaps = await page.evaluate(() => {
+    const rect = (selector) => document.querySelector(selector).getBoundingClientRect();
+    const view = rect("#libraryViewTool .gallery-tool-trigger");
+    const sort = rect("#librarySortTool .gallery-tool-trigger");
+    const acceptButton = rect("#acceptSuggestionsBtn");
+    const search = rect(".toolbar > .search");
+    return [sort.left - view.right, acceptButton.left - sort.right, search.left - acceptButton.right];
+  });
+  expect(Math.max(...gaps) - Math.min(...gaps)).toBeLessThan(1);
+  expect(gaps[0]).toBe(8);
+
+  const styles = () => page.evaluate(() => {
+    const scan = getComputedStyle(document.querySelector("#scanBtn"));
+    const acceptButton = getComputedStyle(document.querySelector("#acceptSuggestionsBtn"));
+    const search = getComputedStyle(document.querySelector(".toolbar > .search"));
+    return {
+      card: search.backgroundColor,
+      pink: acceptButton.backgroundColor,
+      scan: [scan.backgroundColor, scan.color, scan.borderColor],
+      accept: [acceptButton.backgroundColor, acceptButton.color, acceptButton.borderColor],
+    };
+  });
+  const day = await styles();
+  expect(day.scan).toEqual([day.card, day.pink, day.pink]);
+  expect(day.accept).toEqual([day.pink, "rgb(255, 255, 255)", day.pink]);
+
+  await page.evaluate(() => applyTheme("night"));
+  await expect(page.locator("#scanBtn")).toHaveCSS("background-color", "rgb(40, 37, 38)");
+  const night = await styles();
+  expect(night.scan).toEqual([night.card, night.pink, night.pink]);
+  expect(night.accept).toEqual([night.pink, "rgb(255, 255, 255)", night.pink]);
+
+  await page.locator('[data-nav="similar"]').click();
+  const similarGap = await page.evaluate(() => {
+    const acceptButton = document.querySelector("#acceptSuggestionsBtn").getBoundingClientRect();
+    const search = document.querySelector(".toolbar > .search").getBoundingClientRect();
+    return search.left - acceptButton.right;
+  });
+  expect(similarGap).toBe(8);
+});
+
+test("一键采纳的人工复查设置会保存", async ({ page }) => {
+  const requests = await openApp(page);
+  await page.locator("#settingsBtn").click();
+  const setting = page.locator("#removeReviewOnAccept");
+  await expect(setting).not.toBeChecked();
+  await page.locator('label[for="removeReviewOnAccept"]').click();
+  await expect.poll(() => requests.some(request =>
+    request.path === "/api/settings" && request.body?.remove_review_on_accept === true,
+  )).toBe(true);
+});
+
+test("相似组完成后自动跳到下一组并让查看器继续", async ({ page }) => {
+  await openApp(page, { autoAdvance: true, similarGroupCount: 2 });
+  await openProject(page);
+  await page.locator('[data-nav="similar"]').click();
+  await page.locator('[data-similar-group="similar-1"]').click();
+  await page.locator('#similarDetailGallery [data-photo-id="1"] [data-open-id]').click();
+  await page.locator("#viewerKeep").click();
+  await expect(page.locator("#viewerName")).toHaveText("海边-2.jpg");
+  await page.locator("#viewerRemove").click();
+  await expect(page.locator('[data-similar-group="similar-2"]')).toHaveClass(/active/);
+  await expect(page.locator("#viewerName")).toHaveText("海边-3.jpg");
+});
+
+test("相似组卡片完成后跳组但展开界面不跳组", async ({ page }) => {
+  await openApp(page, { autoAdvance: true, similarGroupCount: 2 });
+  await openProject(page);
+  await page.locator('[data-nav="similar"]').click();
+  await page.locator('[data-similar-group="similar-1"]').click();
+  await page.locator('#similarDetailGallery [data-photo-id="1"] [data-decision="keep"]').click();
+  await page.locator('#similarDetailGallery [data-photo-id="2"] [data-decision="remove"]').click();
+  await expect(page.locator('[data-similar-group="similar-2"]')).toHaveClass(/active/);
+
+  await page.locator('[data-similar-group="similar-1"]').click();
+  await page.locator("#similarExpandBtn").click();
+  await page.locator('#similarDetailGallery [data-photo-id="1"] [data-decision="keep"]').click();
+  await page.locator('#similarDetailGallery [data-photo-id="2"] [data-decision="remove"]').click();
+  await expect(page.locator("#similarBackBtn")).toBeVisible();
+  await expect(page.locator('[data-similar-group="similar-1"]')).toHaveClass(/active/);
+});
+
 test("相似组使用照片库同款查看排序组件并组合筛选 RAW", async ({ page }) => {
   await openApp(page, {
     similarVariantPairs: true,
+    similarGroupCount: 2,
   });
   await openProject(page);
   await page.locator('[data-nav="similar"]').click();
@@ -850,16 +1015,33 @@ test("相似组使用照片库同款查看排序组件并组合筛选 RAW", asyn
   await sortTool.locator('[data-similar-sort-direction="desc"]').check();
   await expect(page.locator("#similarDetailGallery [data-photo-id]").first()).toHaveAttribute("data-photo-id", "102");
 
+  await page.locator('[data-similar-group="similar-2"]').click();
+  await expect(sortTool.locator('[data-similar-sort-value="size"]')).toBeChecked();
+  await expect(sortTool.locator('[data-similar-sort-direction="desc"]')).toBeChecked();
+
   await page.locator("#similarExpandBtn").click();
   await expect(page.locator("#similarBackBtn")).toBeVisible();
+  await expect(page.locator("#similarCloseBtn")).toBeVisible();
+  await expect(page.locator("#similarCloseBtn svg use")).toHaveAttribute(
+    "href",
+    iconHref("similar-close"),
+  );
   const positions = await page.evaluate(() => {
     const back = document.querySelector("#similarBackBtn").getBoundingClientRect();
+    const close = document.querySelector("#similarCloseBtn").getBoundingClientRect();
     const view = document.querySelector("#similarViewTool .gallery-tool-trigger").getBoundingClientRect();
     const sort = document.querySelector("#similarSortTool .gallery-tool-trigger").getBoundingClientRect();
-    return { backRight: back.right, viewLeft: view.left, viewRight: view.right, sortLeft: sort.left };
+    return { backRight: back.right, closeLeft: close.left, closeRight: close.right, viewLeft: view.left, viewRight: view.right, sortLeft: sort.left };
   });
-  expect(positions.viewLeft).toBeGreaterThan(positions.backRight);
+  expect(positions.closeLeft).toBeGreaterThan(positions.backRight);
+  expect(positions.viewLeft).toBeGreaterThan(positions.closeRight);
   expect(positions.sortLeft).toBeGreaterThan(positions.viewRight);
+
+  await page.locator("#similarCloseBtn").click();
+  await expect(page.locator("#similarCloseBtn")).toBeHidden();
+  await expect(page.locator("#similarExpandBtn")).toBeVisible();
+  await expect(page.locator('[data-similar-group="similar-2"]')).toHaveClass(/active/);
+  await expect(page.locator("#similarFolderPane")).toBeVisible();
 });
 
 test("相似组建议排序按分值递减并让推荐照片置顶", async ({ page }) => {

@@ -113,6 +113,7 @@ function applySimilarMode() {
   $("#similarCollapseBtn").classList.toggle("hidden", expanded);
   $("#similarExpandBtn").classList.toggle("hidden", expanded);
   $("#similarBackBtn").classList.toggle("hidden", !expanded);
+  $("#similarCloseBtn").classList.toggle("hidden", !expanded);
   $("#similarFolderPane").classList.toggle("hidden", selected && expanded);
   syncSimilarControls();
   document.body.classList.toggle(
@@ -309,8 +310,6 @@ async function openSimilarGroup(groupId) {
   state.similar.decisions = new Set(DECISION_VALUES);
   state.similar.ai = new Set(AI_VALUES);
   state.similar.formats = new Set();
-  state.similar.sort = "suggestion";
-  state.similar.sortDirection = "desc";
   state.similar.mode = window.innerWidth <= 850 ? "expanded" : "side";
   $("#searchInput").value = "";
   $("#searchInput").placeholder = "搜索当前组照片";
@@ -332,8 +331,6 @@ function closeSimilarDetail(restoreSearch = true) {
   state.similar.decisions = new Set(DECISION_VALUES);
   state.similar.ai = new Set(AI_VALUES);
   state.similar.formats = new Set();
-  state.similar.sort = "suggestion";
-  state.similar.sortDirection = "desc";
   state.items = [];
   if (restoreSearch) {
     $("#searchInput").value = state.similar.listSearch;
@@ -353,10 +350,46 @@ function expandSimilarDetail() {
   applySimilarMode();
 }
 
+function collapseSimilarDetail() {
+  if (!state.similar.selectedId) return;
+  state.similar.mode = "side";
+  renderSimilarFolders();
+  applySimilarMode();
+}
+
+function similarGroupComplete() {
+  const members = state.similar.detail?.members || [];
+  return members.length > 0 && members.every((photo) => photo.decision);
+}
+
+async function advanceSimilarGroup(keepViewer = false) {
+  if (
+    state.view !== "similar" ||
+    !state.similar.selectedId ||
+    state.similar.mode === "expanded"
+  ) return false;
+  const currentId = state.similar.selectedId;
+  let index = state.similar.groups.findIndex((group) => group.id === currentId);
+  if (index < 0) return false;
+  if (index + 1 >= state.similar.groups.length && !state.similar.done)
+    await loadSimilarView(false);
+  index = state.similar.groups.findIndex((group) => group.id === currentId);
+  const next = state.similar.groups[index + 1];
+  if (!next) return false;
+  await openSimilarGroup(next.id);
+  if (keepViewer && state.items.length) {
+    state.viewerNeedsRefresh = false;
+    state.viewerDirtyIds.clear();
+    openViewer(0);
+  }
+  return true;
+}
+
 function bindSimilarEvents() {
   $("#similarCollapseBtn").onclick = () => closeSimilarDetail();
   $("#similarBackBtn").onclick = () => closeSimilarDetail();
   $("#similarExpandBtn").onclick = expandSimilarDetail;
+  $("#similarCloseBtn").onclick = collapseSimilarDetail;
   $("#similarFolderPane").onclick = (event) => {
     if (
       state.similar.mode === "side" &&

@@ -545,31 +545,45 @@ function confirmClearDecisions() {
   };
   $("#confirm").showModal();
 }
-function confirmAiRemoveSuggestions() {
-  const count = state.project?.library_counts?.ai_remove_pending ?? 0;
-  if (!count) {
-    toast("没有未决定的建议移除照片");
-    return;
-  }
-  $("#confirmTitle").textContent = `标记 ${count} 张建议移除照片？`;
-  $("#confirmBody").textContent =
-    state.settings.sync_variant_decisions !== false
-      ? "这些照片及其关联格式会统一标记为“移除”；含有已保留文件的关联组会安全跳过。照片文件不会立即移动，之后仍需点击“隔离已标记移除”确认处理。"
-      : "这些照片会标记为“移除”。照片文件不会立即移动，之后仍需点击“隔离已标记移除”确认处理。";
+function confirmAcceptSuggestions() {
+  const similar = state.view === "similar",
+    currentGroup = similar && state.similar.selectedId,
+    scope = similar ? "similar" : state.activeNav;
+  $("#confirmTitle").textContent = "采纳推荐决定？";
+  $("#confirmBody").textContent = similar
+    ? currentGroup
+      ? "当前组中推荐保留的照片会标记为“保留”，其余照片会标记为“移除”。不会修改已决定照片。"
+      : "所有相似组中推荐保留的照片会标记为“保留”，其余照片会标记为“移除”。不会修改已决定照片。"
+    : scope === "ai"
+      ? state.settings.remove_review_on_accept
+        ? "建议移除和人工复查照片会标记为“移除”。不会修改已决定照片。"
+        : "建议移除照片会标记为“移除”，人工复查照片保持未决定。不会修改已决定照片。"
+      : state.settings.remove_review_on_accept
+        ? "建议移除和人工复查照片会标记为“移除”；其他未决定照片会标记为“保留”。不会修改已决定照片。"
+        : "建议移除照片会标记为“移除”，人工复查照片保持未决定；无建议照片会标记为“保留”。不会修改已决定照片。";
   const button = $("#confirmOk");
-  button.textContent = "全部标记移除";
+  button.textContent = "确认采纳";
   button.onclick = async () => {
     button.disabled = true;
     try {
-      const r = await json("/api/decision/ai-remove", {
+      const r = await json("/api/decision/accept", {
         project_id: state.project.id,
+        scope,
+        ...(currentGroup ? { group_id: state.similar.selectedId } : {}),
       });
       $("#confirm").close();
       toast(
-        `已将 ${r.marked} 张照片标记为移除${r.skipped_kept_groups ? `，跳过 ${r.skipped_kept_groups} 个含已保留照片的关联组` : ""}`,
+        `已采纳 ${r.marked} 张照片：保留 ${r.kept} 张，移除 ${r.removed} 张${r.skipped_conflicting_groups ? `，跳过 ${r.skipped_conflicting_groups} 个已有冲突决定的关联组` : ""}`,
       );
       applyProjectCounts(r.project_counts);
-      await loadView();
+      if (currentGroup) {
+        await loadSimilarGroupMembers();
+        if (
+          state.settings.auto_advance &&
+          state.similar.mode !== "expanded" &&
+          similarGroupComplete()
+        ) await advanceSimilarGroup(false);
+      } else await loadView();
     } catch (e) {
       toast(e.message);
     } finally {
@@ -744,6 +758,19 @@ function bindSettingsEvents() {
   $("#autoAdvance").onchange = async (event) => {
     state.settings.auto_advance = event.target.checked;
     await json("/api/settings", { auto_advance: event.target.checked });
+  };
+  $("#removeReviewOnAccept").onchange = async (event) => {
+    const previous = !!state.settings.remove_review_on_accept;
+    try {
+      const saved = await json("/api/settings", {
+        remove_review_on_accept: event.target.checked,
+      });
+      state.settings.remove_review_on_accept =
+        saved.settings.remove_review_on_accept;
+    } catch (error) {
+      event.target.checked = previous;
+      toast(`保存一键采纳设置失败：${error.message}`);
+    }
   };
   $("#fastAnalysis").onchange = async (event) => {
     const input = event.target, previous = !!state.settings.fast_analysis;
