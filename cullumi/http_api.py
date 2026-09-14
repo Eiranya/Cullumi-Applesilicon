@@ -142,6 +142,27 @@ def static_asset_revision(web_root: Path) -> str:
     return digest.hexdigest()[:12]
 
 
+def rendered_index(web_root: Path, token: str) -> str:
+    """Render the page with a local SVG sprite for WebView compatibility."""
+    html = (web_root / "index.html").read_text(encoding="utf-8")
+    sprite = (web_root / "assets" / "icons.svg").read_text(encoding="utf-8")
+    opening_end = sprite.find(">")
+    closing_start = sprite.rfind("</svg>")
+    if opening_end < 0 or closing_start <= opening_end:
+        raise ValueError("图标资源格式无效")
+    symbols = sprite[opening_end + 1 : closing_start]
+    revision = static_asset_revision(web_root)
+    return (
+        html.replace("__ICON_SYMBOLS__", symbols)
+        .replace(
+            "/static/assets/icons.svg?v=__ASSET_REVISION__#",
+            "#",
+        )
+        .replace("__APP_TOKEN__", token)
+        .replace("__ASSET_REVISION__", revision)
+    )
+
+
 @dataclass(frozen=True)
 class ApplicationContext:
     config: ConfigStore
@@ -530,11 +551,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parsed = self._parsed()
             if parsed.path == "/":
-                revision = static_asset_revision(self.application.web_root)
-                html = (self.application.web_root / "index.html").read_text(
-                    encoding="utf-8"
-                ).replace("__APP_TOKEN__", self.application.token).replace(
-                    "__ASSET_REVISION__", revision
+                html = rendered_index(
+                    self.application.web_root,
+                    self.application.token,
                 )
                 data = html.encode("utf-8")
                 self.send_response(200)
@@ -581,6 +600,9 @@ class Handler(BaseHTTPRequestHandler):
                 "fast_analysis": config_data.get("fast_analysis", False),
                 "remove_review_on_accept": config_data.get(
                     "remove_review_on_accept", False
+                ),
+                "confirm_accept_suggestions": config_data.get(
+                    "confirm_accept_suggestions", True
                 ),
                 "auto_check_updates": config_data.get("auto_check_updates", True),
                 "motion_cover_writeback": config_data.get(

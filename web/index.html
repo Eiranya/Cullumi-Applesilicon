@@ -14,11 +14,12 @@
   <link rel="stylesheet" href="/static/css/home.css?v=__ASSET_REVISION__">
 </head>
 <body>
+  <svg class="icon-sprite" aria-hidden="true" focusable="false">__ICON_SYMBOLS__</svg>
   <header class="topbar">
     <div class="brand"><button id="homeBtn" class="logo" title="返回首页" aria-label="返回首页"><img src="/static/assets/images/brand-icon.png" alt="" draggable="false"></button></div>
     <div class="top-actions">
       <span class="select-field topbar-select project-only-action"><select id="profileSelect" title="分析模式"></select><svg class="select-chevron" viewBox="0 0 1024 1024" aria-hidden="true"><use href="/static/assets/icons.svg?v=__ASSET_REVISION__#chevron-down"></use></svg></span>
-      <button id="scanBtn" class="project-only-action">开始扫描</button>
+      <button id="scanBtn" class="project-only-action"><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="#topbar-scanning"></use></svg>扫描</button>
       <button id="settingsBtn" class="icon-button ghost" title="设置" aria-label="设置"><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="/static/assets/icons.svg?v=__ASSET_REVISION__#topbar-setting"></use></svg></button>
       <button id="themeBtn" class="icon-button ghost" title="切换夜间模式" aria-label="切换夜间模式">
         <svg class="theme-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.2 15.4A8.6 8.6 0 0 1 8.6 3.8 8.8 8.8 0 1 0 20.2 15.4Z"/></svg>
@@ -178,6 +179,10 @@
               <div class="settings-row">
                 <div class="setting-copy"><label for="removeReviewOnAccept">一键采纳时移除人工复查</label></div>
                 <label class="setting-switch" aria-label="一键采纳时移除人工复查"><input id="removeReviewOnAccept" type="checkbox"><span aria-hidden="true"></span></label>
+              </div>
+              <div class="settings-row">
+                <div class="setting-copy"><label for="confirmAcceptSuggestions">每次一键采纳前确认</label></div>
+                <label class="setting-switch" aria-label="每次一键采纳前确认"><input id="confirmAcceptSuggestions" type="checkbox"><span aria-hidden="true"></span></label>
               </div>
               <div class="settings-row">
                 <div class="setting-copy"><label for="syncVariantDecisions">相同照片同时决定</label><small>同目录、同名的 RAW 与其他图片格式会同步保留或移除，已有决定不会自动改写。</small></div>

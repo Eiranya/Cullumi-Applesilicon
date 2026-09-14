@@ -545,48 +545,95 @@ function confirmClearDecisions() {
   };
   $("#confirm").showModal();
 }
+async function executeAcceptSuggestions(context, preferenceWarning = "") {
+  const r = await json("/api/decision/accept", {
+    project_id: context.projectId,
+    scope: context.scope,
+    ...(context.currentGroup ? { group_id: context.currentGroup } : {}),
+  });
+  applyProjectCounts(r.project_counts);
+  if (context.currentGroup) {
+    await loadSimilarGroupMembers();
+    if (
+      state.settings.auto_advance &&
+      state.similar.mode !== "expanded" &&
+      similarGroupComplete()
+    ) await advanceSimilarGroup(false);
+  } else await loadView();
+  toast(
+    `已采纳 ${r.marked} 张照片：保留 ${r.kept} 张，移除 ${r.removed} 张${r.skipped_conflicting_groups ? `，跳过 ${r.skipped_conflicting_groups} 个已有冲突决定的关联组` : ""}${preferenceWarning}`,
+  );
+}
+
+async function runAcceptSuggestions(context, dontAsk = false) {
+  const button = $("#acceptSuggestionsBtn");
+  let preferenceWarning = "";
+  button.disabled = true;
+  try {
+    if (dontAsk) {
+      try {
+        const saved = await json("/api/settings", {
+          confirm_accept_suggestions: false,
+        });
+        state.settings.confirm_accept_suggestions =
+          saved.settings.confirm_accept_suggestions;
+        $("#confirmAcceptSuggestions").checked =
+          saved.settings.confirm_accept_suggestions !== false;
+      } catch (error) {
+        preferenceWarning = `；“不再提醒”未保存：${error.message}`;
+      }
+    }
+    await executeAcceptSuggestions(context, preferenceWarning);
+  } catch (error) {
+    toast(`${error.message}${preferenceWarning}`);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function confirmAcceptSuggestions() {
   const similar = state.view === "similar",
     currentGroup = similar && state.similar.selectedId,
-    scope = similar ? "similar" : state.activeNav;
+    context = {
+      projectId: state.project.id,
+      scope: similar ? "similar" : state.activeNav,
+      currentGroup,
+  };
+  if (state.settings.confirm_accept_suggestions === false) {
+    runAcceptSuggestions(context);
+    return;
+  }
+  const dialog = $("#confirm");
   $("#confirmTitle").textContent = "采纳推荐决定？";
-  $("#confirmBody").textContent = similar
+  const message = similar
     ? currentGroup
       ? "当前组中推荐保留的照片会标记为“保留”，其余照片会标记为“移除”。不会修改已决定照片。"
       : "所有相似组中推荐保留的照片会标记为“保留”，其余照片会标记为“移除”。不会修改已决定照片。"
     : state.settings.remove_review_on_accept
       ? "建议移除和人工复查照片会标记为“移除”，无建议照片保持未决定。不会修改已决定照片。"
       : "建议移除照片会标记为“移除”，人工复查和无建议照片保持未决定。不会修改已决定照片。";
+  $("#confirmBody").innerHTML =
+    `<p>${esc(message)}</p><label class="toggle confirm-option"><input id="acceptSuggestionsDontAsk" type="checkbox"><span>不再提醒</span></label><p class="confirm-note">可以随时在设置中重新开启确认。</p>`;
   const button = $("#confirmOk");
   button.textContent = "确认采纳";
-  button.onclick = async () => {
-    button.disabled = true;
-    try {
-      const r = await json("/api/decision/accept", {
-        project_id: state.project.id,
-        scope,
-        ...(currentGroup ? { group_id: state.similar.selectedId } : {}),
-      });
-      $("#confirm").close();
-      toast(
-        `已采纳 ${r.marked} 张照片：保留 ${r.kept} 张，移除 ${r.removed} 张${r.skipped_conflicting_groups ? `，跳过 ${r.skipped_conflicting_groups} 个已有冲突决定的关联组` : ""}`,
-      );
-      applyProjectCounts(r.project_counts);
-      if (currentGroup) {
-        await loadSimilarGroupMembers();
-        if (
-          state.settings.auto_advance &&
-          state.similar.mode !== "expanded" &&
-          similarGroupComplete()
-        ) await advanceSimilarGroup(false);
-      } else await loadView();
-    } catch (e) {
-      toast(e.message);
-    } finally {
+  button.disabled = false;
+  button.classList.remove("danger");
+  button.classList.add("confirm-accept-action");
+  dialog.addEventListener(
+    "close",
+    () => {
       button.disabled = false;
-    }
+      button.classList.remove("confirm-accept-action");
+      button.classList.add("danger");
+    },
+    { once: true },
+  );
+  button.onclick = async () => {
+    const dontAsk = $("#acceptSuggestionsDontAsk").checked;
+    dialog.close();
+    await runAcceptSuggestions(context, dontAsk);
   };
-  $("#confirm").showModal();
+  dialog.showModal();
 }
 
 function selectSettingsPage(button) {
@@ -766,6 +813,24 @@ function bindSettingsEvents() {
     } catch (error) {
       event.target.checked = previous;
       toast(`保存一键采纳设置失败：${error.message}`);
+    }
+  };
+  $("#confirmAcceptSuggestions").onchange = async (event) => {
+    const input = event.target,
+      previous = state.settings.confirm_accept_suggestions !== false;
+    input.disabled = true;
+    try {
+      const saved = await json("/api/settings", {
+        confirm_accept_suggestions: input.checked,
+      });
+      state.settings.confirm_accept_suggestions =
+        saved.settings.confirm_accept_suggestions;
+      input.checked = saved.settings.confirm_accept_suggestions !== false;
+    } catch (error) {
+      input.checked = previous;
+      toast(`保存一键采纳确认设置失败：${error.message}`);
+    } finally {
+      input.disabled = false;
     }
   };
   $("#fastAnalysis").onchange = async (event) => {

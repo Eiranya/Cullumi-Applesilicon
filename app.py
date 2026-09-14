@@ -79,11 +79,20 @@ def run() -> None:
     thread.start()
     try:
         import webview
+        from webview.platforms import winforms
+
+        if winforms.renderer != "edgechromium":
+            raise RuntimeError("Microsoft Edge WebView2 不可用")
 
         window = webview.create_window(
             "Cullumi", url, width=1460, height=940, min_size=(980, 680)
         )
-        webview.start(apply_native_window_icon, (window,), icon=str(APP_ICON))
+        webview.start(
+            apply_native_window_icon,
+            (window,),
+            icon=str(APP_ICON),
+            gui="edgechromium",
+        )
     except Exception:
         try:
             log_path = app_data_dir() / "webview-error.log"

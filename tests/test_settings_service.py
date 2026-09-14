@@ -110,6 +110,7 @@ class SettingsServiceTests(unittest.TestCase):
                     "theme": "night",
                     "auto_advance": False,
                     "remove_review_on_accept": True,
+                    "confirm_accept_suggestions": False,
                 },
             )
 
@@ -118,6 +119,7 @@ class SettingsServiceTests(unittest.TestCase):
             self.assertEqual(saved["theme"], "night")
             self.assertFalse(saved["auto_advance"])
             self.assertTrue(saved["remove_review_on_accept"])
+            self.assertFalse(saved["confirm_accept_suggestions"])
             self.assertTrue(
                 config.get_profile("balanced")["quality"]["enabled"]["niqe"]
             )

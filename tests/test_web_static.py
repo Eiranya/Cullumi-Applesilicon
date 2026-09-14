@@ -89,14 +89,23 @@ class WebResourceContractTests(unittest.TestCase):
             )
         }
         sources = [self.web / "index.html", *(self.web / "js").glob("*.js")]
-        references = {
-            match.group(1)
-            for source in sources
-            for match in re.finditer(
-                r"(?:icons\.svg[^#\"']*|ICONS_URL\})#([A-Za-z0-9_-]+)",
-                source.read_text(encoding="utf-8"),
+        references = set()
+        for source in sources:
+            content = source.read_text(encoding="utf-8")
+            references.update(
+                match.group(1)
+                for match in re.finditer(
+                    r"(?:icons\.svg[^#\"']*|ICONS_URL\})#([A-Za-z0-9_-]+)",
+                    content,
+                )
             )
-        }
+            references.update(
+                match.group(1)
+                for match in re.finditer(
+                    r'''href=["']#([A-Za-z0-9_-]+)''',
+                    content,
+                )
+            )
         self.assertEqual(symbols, references)
 
     def test_component_styles_and_scripts_have_single_owners(self):

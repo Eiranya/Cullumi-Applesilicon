@@ -33,6 +33,14 @@
   box-sizing:border-box
 }
 
+.icon-sprite {
+  position:absolute;
+  width:0;
+  height:0;
+  overflow:hidden;
+  pointer-events:none
+}
+
 body {
   margin:0;
   background:var(--bg);
@@ -79,9 +87,25 @@ select:focus-visible {
 }
 
 #scanBtn {
-  background:var(--card);
-  color:var(--pink);
+  align-items:center;
+  gap:8px
+}
+
+#scanBtn,
+#confirmOk.confirm-accept-action {
+  background:var(--pink);
+  color:#fff;
   border-color:var(--pink)
+}
+
+body.project-open #scanBtn {
+  display:inline-flex
+}
+
+#scanBtn svg {
+  width:18px;
+  height:18px;
+  fill:currentColor
 }
 
 .danger {
@@ -609,4 +633,3 @@ nav button.active em {
 }
 
 /* Application components, themes, and responsive rules. */
-

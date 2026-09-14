@@ -149,6 +149,22 @@ class ConfigRecoveryTests(unittest.TestCase):
         repaired = ConfigStore(self.path)
         self.assertEqual(repaired.data["motion_cover_writeback"], "ask")
 
+    def test_accept_suggestions_confirmation_setting_is_normalized(self) -> None:
+        self.assertTrue(ConfigStore(self.path).data["confirm_accept_suggestions"])
+
+        self.path.write_text(
+            json.dumps({"confirm_accept_suggestions": False}), encoding="utf-8"
+        )
+        self.assertFalse(
+            ConfigStore(self.path).data["confirm_accept_suggestions"]
+        )
+
+        self.path.write_text(
+            json.dumps({"confirm_accept_suggestions": "no"}), encoding="utf-8"
+        )
+        repaired = ConfigStore(self.path)
+        self.assertTrue(repaired.data["confirm_accept_suggestions"])
+
     def test_valid_residual_temp_is_recovered_when_main_file_is_missing(self) -> None:
         temp_path = self.path.with_suffix(".tmp")
         temp_path.write_text('{"theme": "night"}', encoding="utf-8")

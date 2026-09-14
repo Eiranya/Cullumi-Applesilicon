@@ -1,5 +1,7 @@
 const TOKEN = window.APP_TOKEN;
-const ICONS_URL = `/static/assets/icons.svg?v=${encodeURIComponent(window.ASSET_REVISION || "dev")}`;
+// Symbols are injected into the page so every supported Windows WebView can
+// resolve <use> references without loading an external SVG document.
+const ICONS_URL = "";
 const DECISION_VALUES = ["undecided", "keep", "remove"],
   AI_VALUES = ["remove", "review", "no_suggestion"],
   FORMAT_VALUES = ["raw", "jpeg", "heif", "png", "other"],

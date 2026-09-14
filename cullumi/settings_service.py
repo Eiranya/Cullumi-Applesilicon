@@ -28,6 +28,7 @@ def save_settings(config: ConfigStore, body: dict[str, Any]) -> dict[str, Any]:
         "fast_analysis",
         "auto_advance",
         "remove_review_on_accept",
+        "confirm_accept_suggestions",
         "auto_check_updates",
         "sync_variant_decisions",
     ):

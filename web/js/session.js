@@ -91,6 +91,8 @@ async function boot() {
   renderProfiles();
   $("#autoAdvance").checked = !!b.settings.auto_advance;
   $("#removeReviewOnAccept").checked = !!b.settings.remove_review_on_accept;
+  $("#confirmAcceptSuggestions").checked =
+    b.settings.confirm_accept_suggestions !== false;
   $("#fastAnalysis").checked = !!b.settings.fast_analysis;
   $("#syncVariantDecisions").checked =
     b.settings.sync_variant_decisions !== false;

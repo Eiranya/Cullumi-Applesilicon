@@ -413,6 +413,7 @@ class AppSafetyTests(unittest.TestCase):
             self.assertIn("已备份", payload["startup_warning"])
             self.assertNotIn("blink_detection_enabled", payload["settings"])
             self.assertNotIn("niqe_analysis_enabled", payload["settings"])
+            self.assertTrue(payload["settings"]["confirm_accept_suggestions"])
             self.assertTrue(
                 payload["profiles"][0]["similarity"]["blink"]["enabled"]
             )
@@ -590,6 +591,10 @@ class AppSafetyTests(unittest.TestCase):
         self.assertEqual(set(revisions), {expected})
         self.assertIn(f'window.ASSET_REVISION="{expected}"', html)
         self.assertNotIn("__ASSET_REVISION__", html)
+        self.assertNotIn("__ICON_SYMBOLS__", html)
+        self.assertIn('<symbol id="topbar-setting"', html)
+        self.assertIn('href="#topbar-setting"', html)
+        self.assertNotIn('href="/static/assets/icons.svg', html)
         self.assertIn(
             mock.call("Cache-Control", "no-store"),
             handler.send_header.call_args_list,

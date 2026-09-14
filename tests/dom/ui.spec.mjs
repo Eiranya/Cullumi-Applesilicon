@@ -5,7 +5,7 @@ const token = process.env.CULLUMI_DOM_TOKEN || "cullumi-dom-test";
 const image = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='24'%3E%3Crect width='32' height='24' fill='%23d9b7bd'/%3E%3C/svg%3E";
 const runtimeProblems = new WeakMap();
 const iconHref = (name) =>
-  new RegExp(`^/static/assets/icons\\.svg\\?v=[0-9a-f]{12}#${name}$`);
+  new RegExp(`^#${name}$`);
 
 const profiles = [
   { id: "conservative", name: "保守筛选", builtin: true, quality: { enabled: { niqe: true } }, similarity: { blink: { enabled: true, face_confidence_min: 0.85, open_confidence_min: 0.8, closed_confidence_min: 0.8, min_eye_distance_px: 12, reliable_coverage_min: 0.8 } } },
@@ -103,6 +103,7 @@ async function installApi(page, options = {}) {
   let writebackMode = options.writebackMode || "never";
   let syncVariantDecisions = options.syncVariantDecisions ?? true;
   let removeReviewOnAccept = options.removeReviewOnAccept ?? false;
+  let confirmAcceptSuggestions = options.confirmAcceptSuggestions ?? true;
   const decisions = new Map();
   const requests = [];
   const similarPhoto = id => {
@@ -185,6 +186,7 @@ async function installApi(page, options = {}) {
           theme: "day",
           auto_advance: options.autoAdvance ?? false,
           remove_review_on_accept: removeReviewOnAccept,
+          confirm_accept_suggestions: confirmAcceptSuggestions,
           fast_analysis: options.fastAnalysis ?? false,
           auto_check_updates: false,
           sync_variant_decisions: syncVariantDecisions,
@@ -310,7 +312,8 @@ async function installApi(page, options = {}) {
       if (body.motion_cover_writeback) writebackMode = body.motion_cover_writeback;
       if (typeof body.sync_variant_decisions === "boolean") syncVariantDecisions = body.sync_variant_decisions;
       if (typeof body.remove_review_on_accept === "boolean") removeReviewOnAccept = body.remove_review_on_accept;
-      return fulfill({ saved: true, settings: { theme: body.theme || "day", motion_cover_writeback: writebackMode, sync_variant_decisions: syncVariantDecisions, remove_review_on_accept: removeReviewOnAccept } });
+      if (typeof body.confirm_accept_suggestions === "boolean") confirmAcceptSuggestions = body.confirm_accept_suggestions;
+      return fulfill({ saved: true, settings: { theme: body.theme || "day", motion_cover_writeback: writebackMode, sync_variant_decisions: syncVariantDecisions, remove_review_on_accept: removeReviewOnAccept, confirm_accept_suggestions: confirmAcceptSuggestions } });
     }
     if (url.pathname === "/api/update/check") {
       return fulfill(options.updateRelease || {
@@ -493,6 +496,7 @@ test("首页加载全部脚本并异步渲染最近项目", async ({ page }) => 
   await expect(page).toHaveTitle("Cullumi");
   await expect(page.locator("#appVersion")).toHaveText("v1.0.4");
   await expect(page.locator("#chooseBtn svg use")).toHaveAttribute("href", iconHref("home-folder"));
+  expect(await page.locator("#chooseBtn svg").evaluate((icon) => icon.getBBox().width)).toBeGreaterThan(0);
   await expect(page.locator("#recentList .recent-meta")).toContainText("2 张");
   await expect(page.locator("#recentList .recent-thumb img")).toHaveCount(1);
   await expect(page.locator("#recentList .recent-more svg use").first()).toHaveAttribute("href", iconHref("home-more"));
@@ -749,34 +753,18 @@ test("照片库工具栏离开视野后显示圆形回到顶部按钮", async ({
   await main.evaluate((element) => element.scrollTo(0, element.scrollHeight));
   await expect.poll(() => main.evaluate((element) => element.scrollTop)).toBeGreaterThan(200);
   await expect(button).toBeVisible();
-  const scan = page.locator("#scanBtn");
+  const accept = page.locator("#acceptSuggestionsBtn");
   const colors = (control) => control.evaluate((element) => {
     const style = getComputedStyle(element);
     return [style.backgroundColor, style.borderColor, style.color];
   });
-  const finishAnimations = (control) =>
-    control.evaluate((element) => element.getAnimations().forEach((animation) => animation.finish()));
+  expect(await colors(button)).toEqual(await colors(accept));
 
-  expect(await colors(button)).toEqual(await colors(scan));
-  await scan.hover();
-  await finishAnimations(scan);
-  const dayHover = await colors(scan);
-  await button.hover();
-  await finishAnimations(button);
-  expect(await colors(button)).toEqual(dayHover);
-
-  await page.mouse.move(300, 300);
   await page.evaluate(() => {
     applyTheme("night");
     document.getAnimations().forEach((animation) => animation.finish());
   });
-  expect(await colors(button)).toEqual(await colors(scan));
-  await scan.hover();
-  await finishAnimations(scan);
-  const nightHover = await colors(scan);
-  await button.hover();
-  await finishAnimations(button);
-  expect(await colors(button)).toEqual(nightHover);
+  expect(await colors(button)).toEqual(await colors(accept));
   const controlsAreVisible = await page.evaluate(() => {
     const root = document.querySelector("body > main").getBoundingClientRect();
     return [document.querySelector("#libraryFilters"), document.querySelector(".toolbar > .search")]
@@ -830,8 +818,55 @@ test("智能建议工具栏按内容区宽度分行且标题保持单行", async
   const narrow = await positions();
   expect(narrow.title.height).toBeLessThan(30);
   expect(Math.abs(narrow.filters.top - narrow.action.top)).toBeLessThan(1);
-  expect(narrow.search.top).toBeGreaterThanOrEqual(narrow.filters.bottom);
+  expect(Math.abs(narrow.search.top - narrow.filters.top)).toBeLessThan(1);
+  expect(narrow.heading.bottom).toBeLessThanOrEqual(narrow.filters.top);
   expect(narrow.search.right).toBeLessThanOrEqual(narrow.toolbar.right);
+});
+
+test("相似连拍窄窗口工具栏在标题下保持同一行", async ({ page }) => {
+  await page.setViewportSize({ width: 1040, height: 720 });
+  await openApp(page);
+  await openProject(page);
+  await page.locator('[data-nav="similar"]').click();
+  await page.locator('[data-similar-group="similar-1"]').click();
+
+  const positions = await page.locator(".toolbar").evaluate((toolbar) => {
+    const rect = (selector) => {
+      const box = toolbar.querySelector(selector).getBoundingClientRect();
+      return {
+        top: box.top,
+        right: box.right,
+        bottom: box.bottom,
+        left: box.left,
+        center: (box.top + box.bottom) / 2,
+      };
+    };
+    const toolbarBox = toolbar.getBoundingClientRect();
+    return {
+      toolbarRight: toolbarBox.right,
+      heading: rect(":scope > div:first-child"),
+      collapse: rect("#similarCollapseBtn"),
+      expand: rect("#similarExpandBtn"),
+      view: rect("#similarViewTool .gallery-tool-trigger"),
+      sort: rect("#similarSortTool .gallery-tool-trigger"),
+      accept: rect("#acceptSuggestionsBtn"),
+      search: rect(".search"),
+    };
+  });
+  const controls = [
+    positions.collapse,
+    positions.expand,
+    positions.view,
+    positions.sort,
+    positions.accept,
+    positions.search,
+  ];
+  expect(Math.max(...controls.map((item) => item.center)) - Math.min(...controls.map((item) => item.center))).toBeLessThan(1);
+  expect(Math.min(...controls.map((item) => item.top))).toBeGreaterThanOrEqual(positions.heading.bottom);
+  for (let index = 1; index < controls.length; index += 1)
+    expect(controls[index].left).toBeGreaterThanOrEqual(controls[index - 1].right);
+  expect(positions.search.right).toBeLessThanOrEqual(positions.toolbarRight);
+  expect(positions.search.right).toBeGreaterThanOrEqual(positions.toolbarRight - 1);
 });
 
 test("一键采纳显示在指定页面并提交当前范围", async ({ page }) => {
@@ -843,10 +878,15 @@ test("一键采纳显示在指定页面并提交当前范围", async ({ page }) 
   expect(await accept.evaluate(button => button.nextElementSibling?.classList.contains("search"))).toBe(true);
 
   await accept.click();
-  await expect(page.locator("#confirmBody")).toHaveText(
+  await expect(page.locator("#confirmOk")).toHaveClass(/confirm-accept-action/);
+  await expect(page.locator("#confirmOk")).not.toHaveClass(/danger/);
+  await expect(page.locator("#confirmBody > p").first()).toHaveText(
     "建议移除照片会标记为“移除”，人工复查和无建议照片保持未决定。不会修改已决定照片。",
   );
+  await expect(page.locator("#acceptSuggestionsDontAsk")).not.toBeChecked();
   await page.locator("#confirmOk").click();
+  await expect(page.locator("#confirmOk")).toHaveClass(/danger/);
+  await expect(page.locator("#confirmOk")).not.toHaveClass(/confirm-accept-action/);
   await expect.poll(() => requests.some(request =>
     request.path === "/api/decision/accept" && request.body?.scope === "library",
   )).toBe(true);
@@ -885,6 +925,12 @@ test("一键采纳图标、工具栏间距与扫描按钮主题样式正确", as
     "href",
     iconHref("decision-confirm"),
   );
+  const scan = page.locator("#scanBtn");
+  await expect(scan).toHaveText("扫描");
+  await expect(scan.locator("svg use")).toHaveAttribute(
+    "href",
+    iconHref("topbar-scanning"),
+  );
   const gaps = await page.evaluate(() => {
     const rect = (selector) => document.querySelector(selector).getBoundingClientRect();
     const view = rect("#libraryViewTool .gallery-tool-trigger");
@@ -902,20 +948,29 @@ test("一键采纳图标、工具栏间距与扫描按钮主题样式正确", as
     const search = getComputedStyle(document.querySelector(".toolbar > .search"));
     return {
       card: search.backgroundColor,
-      pink: acceptButton.backgroundColor,
+      pink: acceptButton.color,
       scan: [scan.backgroundColor, scan.color, scan.borderColor],
       accept: [acceptButton.backgroundColor, acceptButton.color, acceptButton.borderColor],
     };
   });
   const day = await styles();
-  expect(day.scan).toEqual([day.card, day.pink, day.pink]);
-  expect(day.accept).toEqual([day.pink, "rgb(255, 255, 255)", day.pink]);
+  expect(day.scan).toEqual([day.pink, "rgb(255, 255, 255)", day.pink]);
+  expect(day.accept).toEqual([day.card, day.pink, day.pink]);
 
   await page.evaluate(() => applyTheme("night"));
-  await expect(page.locator("#scanBtn")).toHaveCSS("background-color", "rgb(40, 37, 38)");
+  await expect(accept).toHaveCSS("background-color", "rgb(40, 37, 38)");
   const night = await styles();
-  expect(night.scan).toEqual([night.card, night.pink, night.pink]);
-  expect(night.accept).toEqual([night.pink, "rgb(255, 255, 255)", night.pink]);
+  expect(night.scan).toEqual([night.pink, "rgb(255, 255, 255)", night.pink]);
+  expect(night.accept).toEqual([night.card, night.pink, night.pink]);
+
+  await accept.click();
+  await expect(page.locator("#confirm")).toBeVisible();
+  const confirmStyle = await page.locator("#confirmOk").evaluate((button) => {
+    const style = getComputedStyle(button);
+    return [style.backgroundColor, style.color, style.borderColor];
+  });
+  expect(confirmStyle).toEqual(night.scan);
+  await page.locator('#confirm [data-close]').click();
 
   await page.locator('[data-nav="similar"]').click();
   const similarGap = await page.evaluate(() => {
@@ -935,6 +990,37 @@ test("一键采纳的人工复查设置会保存", async ({ page }) => {
   await expect.poll(() => requests.some(request =>
     request.path === "/api/settings" && request.body?.remove_review_on_accept === true,
   )).toBe(true);
+});
+
+test("一键采纳可以不再提醒并在设置中重新开启确认", async ({ page }) => {
+  const requests = await openApp(page);
+  await openProject(page);
+  const accept = page.locator("#acceptSuggestionsBtn");
+
+  await accept.click();
+  await page.locator("#acceptSuggestionsDontAsk").check();
+  await page.locator("#confirmOk").click();
+  await expect.poll(() => requests.some(request =>
+    request.path === "/api/settings" && request.body?.confirm_accept_suggestions === false,
+  )).toBe(true);
+  await expect.poll(() => requests.filter(request => request.path === "/api/decision/accept").length).toBe(1);
+
+  const acceptedBefore = requests.filter(request => request.path === "/api/decision/accept").length;
+  await accept.click();
+  await expect(page.locator("#confirm")).toBeHidden();
+  await expect.poll(() => requests.filter(request => request.path === "/api/decision/accept").length).toBe(acceptedBefore + 1);
+
+  await page.locator("#settingsBtn").click();
+  const setting = page.locator("#confirmAcceptSuggestions");
+  await expect(setting).not.toBeChecked();
+  await page.locator('label[for="confirmAcceptSuggestions"]').click();
+  await expect.poll(() => requests.some(request =>
+    request.path === "/api/settings" && request.body?.confirm_accept_suggestions === true,
+  )).toBe(true);
+  await page.locator('#settings [data-close]').click();
+  await accept.click();
+  await expect(page.locator("#confirm")).toBeVisible();
+  await expect(page.locator("#acceptSuggestionsDontAsk")).not.toBeChecked();
 });
 
 test("相似组完成后自动跳到下一组并让查看器继续", async ({ page }) => {
