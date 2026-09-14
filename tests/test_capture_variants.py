@@ -419,8 +419,8 @@ class CaptureVariantTests(unittest.TestCase):
                 {"project_id": self.project.project_id, "scope": "library"}
             )
         result = handler._send_json.call_args.args[0]
-        self.assertEqual(result["marked"], 2)
-        self.assertEqual(result["kept"], 1)
+        self.assertEqual(result["marked"], 1)
+        self.assertEqual(result["kept"], 0)
         self.assertEqual(result["removed"], 1)
         with closing(connect_db(self.project.db_path)) as conn:
             decisions = {
@@ -429,7 +429,7 @@ class CaptureVariantTests(unittest.TestCase):
             }
         self.assertEqual(
             decisions,
-            {remove: "remove", review: "", keep: "keep"},
+            {remove: "remove", review: "", keep: ""},
         )
 
         with self.config.edit() as data:
@@ -444,12 +444,36 @@ class CaptureVariantTests(unittest.TestCase):
         self.assertEqual(result["kept"], 0)
         self.assertEqual(result["removed"], 1)
         with closing(connect_db(self.project.db_path)) as conn:
-            self.assertEqual(
-                conn.execute(
-                    "SELECT decision FROM photos WHERE id=?", (review,)
-                ).fetchone()[0],
-                "remove",
+            decisions = {
+                int(row["id"]): row["decision"]
+                for row in conn.execute("SELECT id,decision FROM photos")
+            }
+        self.assertEqual(
+            decisions,
+            {remove: "remove", review: "remove", keep: ""},
+        )
+
+        with closing(connect_db(self.project.db_path)) as conn:
+            conn.execute("UPDATE photos SET decision='' WHERE id IN (?,?)", (remove, review))
+            conn.commit()
+        handler._send_json.reset_mock()
+        with mock.patch.object(http_api, "APPLICATION", self.application()):
+            handler.api_decision_accept(
+                {"project_id": self.project.project_id, "scope": "ai"}
             )
+        result = handler._send_json.call_args.args[0]
+        self.assertEqual(result["marked"], 2)
+        self.assertEqual(result["kept"], 0)
+        self.assertEqual(result["removed"], 2)
+        with closing(connect_db(self.project.db_path)) as conn:
+            decisions = {
+                int(row["id"]): row["decision"]
+                for row in conn.execute("SELECT id,decision FROM photos")
+            }
+        self.assertEqual(
+            decisions,
+            {remove: "remove", review: "remove", keep: ""},
+        )
 
     def test_accept_similar_assigns_variants_and_protects_conflicts(self) -> None:
         with closing(connect_db(self.project.db_path)) as conn:

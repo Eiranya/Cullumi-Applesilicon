@@ -380,18 +380,14 @@ def accept_decisions(
                 "status='active'",
                 "COALESCE(error,'')=''",
                 "COALESCE(suggestion,'keep')<>'unreadable'",
+                "suggestion IN ('remove','review')",
                 "decision=''",
             ]
-            if scope == "ai":
-                where.append("suggestion IN ('remove','review')")
             rows = conn.execute(
                 f"SELECT id,suggestion FROM photos WHERE {' AND '.join(where)}",
             ).fetchall()
             seeds = [
-                (
-                    int(row["id"]),
-                    "remove" if row["suggestion"] in {"remove", "review"} else "keep",
-                )
+                (int(row["id"]), "remove")
                 for row in rows
                 if row["suggestion"] != "review" or remove_review_on_accept
             ]

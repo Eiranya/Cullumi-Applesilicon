@@ -357,7 +357,7 @@ body.similar-view-open:not(.similar-detail-open) .batch-accept-button {
   justify-content:center;
   border:1px solid var(--pink);
   border-radius:50%;
-  background:color-mix(in srgb,var(--card) 94%,transparent);
+  background:var(--card);
   color:var(--pink);
   box-shadow:0 5px 15px rgba(67,37,45,.18);
   opacity:0;
@@ -383,9 +383,10 @@ body.similar-view-open:not(.similar-detail-open) .batch-accept-button {
   transform:rotate(180deg);
 }
 
-.library-back-to-top:hover:not(:disabled) {
-  border-color:var(--pink);
-  background:var(--pink);
+#libraryBackToTop:hover:not(:disabled) {
+  border-color:var(--pink-hover);
+  background:var(--surface-hover);
+  color:var(--pink-hover);
 }
 
 html,

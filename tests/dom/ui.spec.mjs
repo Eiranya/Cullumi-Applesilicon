@@ -749,6 +749,34 @@ test("照片库工具栏离开视野后显示圆形回到顶部按钮", async ({
   await main.evaluate((element) => element.scrollTo(0, element.scrollHeight));
   await expect.poll(() => main.evaluate((element) => element.scrollTop)).toBeGreaterThan(200);
   await expect(button).toBeVisible();
+  const scan = page.locator("#scanBtn");
+  const colors = (control) => control.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return [style.backgroundColor, style.borderColor, style.color];
+  });
+  const finishAnimations = (control) =>
+    control.evaluate((element) => element.getAnimations().forEach((animation) => animation.finish()));
+
+  expect(await colors(button)).toEqual(await colors(scan));
+  await scan.hover();
+  await finishAnimations(scan);
+  const dayHover = await colors(scan);
+  await button.hover();
+  await finishAnimations(button);
+  expect(await colors(button)).toEqual(dayHover);
+
+  await page.mouse.move(300, 300);
+  await page.evaluate(() => {
+    applyTheme("night");
+    document.getAnimations().forEach((animation) => animation.finish());
+  });
+  expect(await colors(button)).toEqual(await colors(scan));
+  await scan.hover();
+  await finishAnimations(scan);
+  const nightHover = await colors(scan);
+  await button.hover();
+  await finishAnimations(button);
+  expect(await colors(button)).toEqual(nightHover);
   const controlsAreVisible = await page.evaluate(() => {
     const root = document.querySelector("body > main").getBoundingClientRect();
     return [document.querySelector("#libraryFilters"), document.querySelector(".toolbar > .search")]
@@ -815,6 +843,9 @@ test("一键采纳显示在指定页面并提交当前范围", async ({ page }) 
   expect(await accept.evaluate(button => button.nextElementSibling?.classList.contains("search"))).toBe(true);
 
   await accept.click();
+  await expect(page.locator("#confirmBody")).toHaveText(
+    "建议移除照片会标记为“移除”，人工复查和无建议照片保持未决定。不会修改已决定照片。",
+  );
   await page.locator("#confirmOk").click();
   await expect.poll(() => requests.some(request =>
     request.path === "/api/decision/accept" && request.body?.scope === "library",

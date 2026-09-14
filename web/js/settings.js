@@ -554,13 +554,9 @@ function confirmAcceptSuggestions() {
     ? currentGroup
       ? "当前组中推荐保留的照片会标记为“保留”，其余照片会标记为“移除”。不会修改已决定照片。"
       : "所有相似组中推荐保留的照片会标记为“保留”，其余照片会标记为“移除”。不会修改已决定照片。"
-    : scope === "ai"
-      ? state.settings.remove_review_on_accept
-        ? "建议移除和人工复查照片会标记为“移除”。不会修改已决定照片。"
-        : "建议移除照片会标记为“移除”，人工复查照片保持未决定。不会修改已决定照片。"
-      : state.settings.remove_review_on_accept
-        ? "建议移除和人工复查照片会标记为“移除”；其他未决定照片会标记为“保留”。不会修改已决定照片。"
-        : "建议移除照片会标记为“移除”，人工复查照片保持未决定；无建议照片会标记为“保留”。不会修改已决定照片。";
+    : state.settings.remove_review_on_accept
+      ? "建议移除和人工复查照片会标记为“移除”，无建议照片保持未决定。不会修改已决定照片。"
+      : "建议移除照片会标记为“移除”，人工复查和无建议照片保持未决定。不会修改已决定照片。";
   const button = $("#confirmOk");
   button.textContent = "确认采纳";
   button.onclick = async () => {

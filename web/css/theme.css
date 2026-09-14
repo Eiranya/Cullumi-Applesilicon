@@ -126,7 +126,8 @@
   background: var(--surface-hover);
 }
 
-[data-theme="night"] #scanBtn {
+[data-theme="night"] #scanBtn,
+[data-theme="night"] #libraryBackToTop {
   color: var(--pink);
   background: var(--card);
   border-color: var(--pink);
@@ -163,7 +164,8 @@
   border-color: var(--pink-hover);
 }
 
-[data-theme="night"] #scanBtn:hover:not(:disabled) {
+[data-theme="night"] #scanBtn:hover:not(:disabled),
+[data-theme="night"] #libraryBackToTop:hover:not(:disabled) {
   color: var(--pink-hover);
   background: var(--surface-hover);
   border-color: var(--pink-hover);
