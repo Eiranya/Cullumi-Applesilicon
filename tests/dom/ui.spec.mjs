@@ -180,7 +180,7 @@ async function installApi(page, options = {}) {
 
     if (url.pathname === "/api/bootstrap") {
       return fulfill({
-        version: "1.0.4",
+        version: "1.0.5",
         profiles,
         settings: {
           theme: "day",
@@ -317,8 +317,8 @@ async function installApi(page, options = {}) {
     }
     if (url.pathname === "/api/update/check") {
       return fulfill(options.updateRelease || {
-        current_version: "1.0.4",
-        latest_version: "1.0.4",
+        current_version: "1.0.5",
+        latest_version: "1.0.6",
         update_available: false,
         download_available: false,
         release_notes: "",
@@ -540,7 +540,7 @@ test("首页加载全部脚本并异步渲染最近项目", async ({ page }) => 
   await openApp(page);
 
   await expect(page).toHaveTitle("Cullumi");
-  await expect(page.locator("#appVersion")).toHaveText("v1.0.4");
+  await expect(page.locator("#appVersion")).toHaveText("v1.0.5");
   await expect(page.locator("#chooseBtn svg use")).toHaveAttribute("href", iconHref("home-folder"));
   const iconBounds = await page.locator("#chooseBtn svg use").evaluate((icon) => {
     const box = icon.getBBox();
