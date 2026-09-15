@@ -88,7 +88,8 @@ select:focus-visible {
 
 #scanBtn {
   align-items:center;
-  gap:8px
+  gap:8px;
+  padding-inline:13px 15px
 }
 
 #scanBtn,
