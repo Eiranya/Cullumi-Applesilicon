@@ -47,6 +47,9 @@ fi
 # cullumi/analysis_worker.py      worker restart cap raised (measured 13% gain)
 # cullumi/classification.py       quality reasons in plain words, not metric names
 # cullumi/config.py               macOS app-data dir; blink_gpu_enabled default
+# cullumi/decision_service.py     report which photos a synced decision folded
+#                                 away, so the library can show one card per
+#                                 capture group instead of one per format
 # cullumi/face_analysis.py        CoreML execution provider + CPU fallback
 # cullumi/http_api.py             platform-aware update message; GPU setting
 # cullumi/native_dialogs.py       macOS file dialogs via pywebview
@@ -64,19 +67,27 @@ fi
 #                                 predictable (preview-sharpness / PRD P0-1)
 # web/css/home.css                drag-and-drop highlight for the empty state
 # web/css/workspace.css           group processing-status badge
+# web/css/viewer.css              viewer: the capture-variant format switch
+#                                 renders each format inside the existing
+#                                 variant badge as its own button, so the
+#                                 badge needs an active/hover style
 # web/index.html                  hardware-acceleration switch; plain-word labels
-# web/js/app.js                   bind the drag-and-drop affordance
+# web/js/app.js                   bind the drag-and-drop affordance; F cycles the
+#                                 previewed capture-variant format
 # web/js/gallery.js               refresh the group badge after a decision
 # web/js/runtime.js               statusFilter in the shared view state
 # web/js/session.js               GPU status on boot; drop accept/reject entry points
 # web/js/settings.js              platform-aware update text; GPU switch handler
 # web/js/similar.js               render + live-update the group status badge
+# web/js/viewer.js                viewer: switch between RAW and JPEG of one
+#                                 exposure, using each format's own payload
 EXPECTED_DIFFER="app.py
 cullumi/__init__.py
 cullumi/analysis_worker.py
 cullumi/capture_variants.py
 cullumi/classification.py
 cullumi/config.py
+cullumi/decision_service.py
 cullumi/face_analysis.py
 cullumi/http_api.py
 cullumi/media.py
@@ -95,6 +106,7 @@ tests/test_scanner.py
 tests/test_settings_service.py
 web/css/base.css
 web/css/home.css
+web/css/viewer.css
 web/css/workspace.css
 web/index.html
 web/js/app.js
@@ -102,13 +114,15 @@ web/js/gallery.js
 web/js/runtime.js
 web/js/session.js
 web/js/settings.js
-web/js/similar.js"
+web/js/similar.js
+web/js/viewer.js"
 
 # Files under web/ deliberately unfrozen for this port. web/ as a whole is NOT
 # frozen -- these were opened up one by one, and each difference is reviewed by
 # hand below. Anything else differing under web/ is still a violation.
 AUTHORIZED_WEB="web/css/base.css
 web/css/home.css
+web/css/viewer.css
 web/css/workspace.css
 web/index.html
 web/js/app.js
@@ -116,7 +130,8 @@ web/js/gallery.js
 web/js/runtime.js
 web/js/session.js
 web/js/settings.js
-web/js/similar.js"
+web/js/similar.js
+web/js/viewer.js"
 
 # Directories that must stay byte-identical, except for the files listed below.
 # These are the basis for the zero-regression claim, so loosening them requires
@@ -262,13 +277,23 @@ verify-macos.sh"
 # macOS-native project that is normal use, and letting it fail the gate would
 # train the reader to ignore the gate. Excluding them keeps the result stable
 # across runs without weakening what the gate is actually asserting.
+#
+# The bytecode pattern is matched as '*.pyc' rather than by directory name.
+# diff(1) matches --exclude against the basename only, so a bare
+# --exclude=__pycache__ covers ./__pycache__ but not tests/__pycache__ -- and
+# running the test suite creates exactly that. The gate would then fail on a
+# clean tree purely because someone had run the tests, which is worse than
+# useless: it teaches the reader to ignore it. .build is excluded for the same
+# reason: it is scratch space for a relocated PyInstaller cache, not a
+# deliverable, and .gitignore does not list it either.
 OUT="$(mktemp "${TMPDIR:-/tmp}/cullumi-dq.XXXXXX")"
 VIOLATIONS="$(mktemp "${TMPDIR:-/tmp}/cullumi-violations.XXXXXX")"
 trap 'rm -f "$OUT" "$VIOLATIONS"' EXIT
 
 diff -rq "$UPSTREAM" . \
     --exclude=.git --exclude=dist --exclude=build \
-    --exclude=__pycache__ --exclude=.ruff_cache --exclude=.DS_Store \
+    --exclude='*.pyc' --exclude=.ruff_cache --exclude=.DS_Store \
+    --exclude=.build --exclude=__pycache__ \
     > "$OUT" 2>/dev/null || true
 
 DIFFER=$(grep -c 'differ$' "$OUT" || true)

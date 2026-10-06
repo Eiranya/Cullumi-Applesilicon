@@ -9,6 +9,7 @@ from .capture_variants import (
     format_category,
     variant_metadata,
     variant_metadata_from_rows,
+    variant_representative_ids,
 )
 from .classification import (
     PHOTO_AI_FILTERS,
@@ -38,6 +39,30 @@ PHOTO_SORT_EXPRESSIONS = {
 }
 PHOTO_SORT_DIRECTIONS = {"asc": "ASC", "desc": "DESC"}
 SIMILAR_GROUP_PAGE_LIMIT = 500
+
+
+def capture_variant_collapse_clause(where: str) -> str:
+    """Build the predicate that hides a photo folded into its group's card.
+
+    ``where`` is the caller's own photo predicate, re-applied to the
+    *representative* so the folding follows the active filters. That matters
+    for more than tidiness: filter the library down to ``formats=raw`` and the
+    JPEG representative drops out of the result set, so the RAW has to become
+    the card instead of vanishing along with it. The same reasoning applies to
+    a decision filter that separates the two formats, and to a search that
+    matches only the RAW's filename.
+
+    The bare column names in ``where`` bind to the joined ``rep`` row because
+    SQLite resolves an unqualified name to the innermost scope that has it.
+    Every parameter of ``where`` therefore has to be supplied twice by the
+    caller -- once for the outer row, once for the representative.
+    """
+    return (
+        "EXISTS(SELECT 1 FROM capture_variant_members cv"
+        " JOIN photos rep ON rep.id=cv.representative_id"
+        f" WHERE cv.photo_id=photos.id AND cv.representative_id<>photos.id"
+        f" AND ({where}))"
+    )
 
 
 def photo_sort_order(sort: str, direction: str = "asc") -> str:
@@ -129,6 +154,8 @@ class PhotoQueryService:
         row: Any,
         profile: dict[str, Any] | None = None,
         variant_extensions: list[str] | tuple[str, ...] = (),
+        *,
+        representative_id: int | None = None,
     ) -> dict[str, Any]:
         data = {key: row[key] for key in row.keys()}
         data.pop("capture_representative_id", None)
@@ -140,6 +167,14 @@ class PhotoQueryService:
             data.get("extension"), data.get("relative_path")
         )
         data["variant_extensions"] = list(variant_extensions)
+        # True when this file is folded into another file's card in the library.
+        # A representative is never folded, and neither is a photo that belongs
+        # to no capture-variant group -- that is what keeps standalone photos,
+        # byte-identical duplicates and similarity-group members on screen.
+        data["is_capture_variant"] = (
+            representative_id is not None
+            and int(representative_id) != int(row["id"])
+        )
         if not str(row["error"] or ""):
             if profile is None:
                 project = self.manager.from_id(project_id)
@@ -212,16 +247,38 @@ class PhotoQueryService:
         if search:
             where += " AND relative_path LIKE ?"
             params.append(f"%{search}%")
+        # Folding happens HERE, in the listing query, and not in the browser:
+        # whether a photo may collapse is a function of the active filters (see
+        # capture_variant_collapse_clause), and the browser only ever holds one
+        # page of results -- it cannot know whether the representative survived
+        # the filter. Doing it server-side also keeps `total`, the offset
+        # arithmetic and the "accept all suggestions" scope consistent with what
+        # is on screen, which client-side filtering would silently break.
+        # Callers that genuinely need every row (the benchmark harness) pass
+        # collapse_variants=0.
+        collapse_variants = query.get("collapse_variants", ["1"])[0] != "0"
+        listing_where = where
+        listing_params = list(params)
+        if collapse_variants:
+            listing_where = (
+                f"{where} AND NOT ({capture_variant_collapse_clause(where)})"
+            )
+            # `where` now appears twice, so every bind value is needed twice.
+            listing_params = [*params, *params]
         with closing(connect_db(project.db_path)) as conn:
             total = conn.execute(
-                f"SELECT COUNT(*) FROM photos WHERE {where}", params
+                f"SELECT COUNT(*) FROM photos WHERE {listing_where}",
+                listing_params,
             ).fetchone()[0]
             rows = conn.execute(
-                f"""SELECT * FROM photos WHERE {where}
+                f"""SELECT * FROM photos WHERE {listing_where}
                     ORDER BY {order_by} LIMIT ? OFFSET ?""",
-                [*params, limit, offset],
+                [*listing_params, limit, offset],
             ).fetchall()
             variants = variant_metadata(conn, (int(row["id"]) for row in rows))
+            representatives = variant_representative_ids(
+                conn, (int(row["id"]) for row in rows)
+            )
         return {
             "total": total,
             "items": [
@@ -230,9 +287,54 @@ class PhotoQueryService:
                     row,
                     profile,
                     variants.get(int(row["id"]), []),
+                    representative_id=representatives.get(int(row["id"])),
                 )
                 for row in rows
             ],
+        }
+
+    def capture_variants(self, query: dict[str, list[str]]) -> dict[str, Any]:
+        """Every format of one photo's capture-variant group, in full.
+
+        The library folds a RAW+JPEG pair into a single card, so the browser
+        only ever holds the representative. That is right for a grid but it
+        leaves the folded format with no way in: no id, no filename, no URL.
+        The viewer needs all of them to switch between formats, and it needs
+        each sibling's *own* analysis -- a RAW's sharpness and score are not
+        the JPEG's -- so this returns whole payloads rather than a list of
+        extensions.
+
+        Deliberately a separate endpoint instead of a field on `photos()`: the
+        listing is fetched on every scroll page, and sibling payloads would
+        ride along for photos the user never previews.
+        """
+        project_id = query.get("project_id", [""])[0]
+        photo_id = int(query.get("id", ["0"])[0])
+        project = self.manager.from_id(project_id)
+        profile = self.config.get_profile(project.profile_id)
+        with closing(connect_db(project.db_path)) as conn:
+            source = conn.execute(
+                "SELECT * FROM photos WHERE id=? AND status='active'",
+                (photo_id,),
+            ).fetchone()
+            if not source:
+                raise ValueError("照片不存在或当前不可用")
+            variant_rows = active_variant_rows(conn, (photo_id,))
+            extensions = variant_metadata_from_rows(variant_rows)
+        rows = variant_rows.get(photo_id) or [source]
+        return {
+            "items": [
+                self.photo_payload(
+                    project_id,
+                    row,
+                    profile,
+                    extensions.get(int(row["id"]), []),
+                    representative_id=int(row["capture_representative_id"])
+                    if "capture_representative_id" in row.keys()
+                    else photo_id,
+                )
+                for row in rows
+            ]
         }
 
     def similar_groups(self, query: dict[str, list[str]]) -> dict[str, Any]:

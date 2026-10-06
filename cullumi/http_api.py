@@ -90,6 +90,7 @@ GET_ROUTES = {
     "/api/project": "api_project",
     "/api/progress": "api_progress",
     "/api/photos": "api_photos",
+    "/api/photo/variants": "api_photo_variants",
     "/api/similar-groups": "api_similar_groups",
     "/api/similar-group": "api_similar_group",
     "/api/thumb": "api_thumb",
@@ -654,6 +655,10 @@ class Handler(BaseHTTPRequestHandler):
         assert self.application.photo_queries is not None
         self._send_json(self.application.photo_queries.photos(self._query()))
 
+    def api_photo_variants(self) -> None:
+        assert self.application.photo_queries is not None
+        self._send_json(self.application.photo_queries.capture_variants(self._query()))
+
     def api_similar_groups(self) -> None:
         assert self.application.photo_queries is not None
         self._send_json(self.application.photo_queries.similar_groups(self._query()))
@@ -895,6 +900,9 @@ class Handler(BaseHTTPRequestHandler):
                     row,
                     profile,
                     result.variant_extensions.get(photo_id, []),
+                    representative_id=result.variant_representatives.get(
+                        photo_id
+                    ),
                 )
                 item["previous_decision"] = result.previous.get(photo_id, "")
                 affected_photos.append(item)

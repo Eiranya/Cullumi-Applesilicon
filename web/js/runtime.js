@@ -24,6 +24,11 @@ const state = {
   recentMenuId: "",
   recentGeneration: 0,
   viewerIndex: 0,
+  // Formats of the capture-variant group behind the previewed photo, fetched
+  // on demand. `index` is the entry on screen; -1 means the library's own
+  // representative, which is what a photo outside any group resolves to.
+  viewerVariants: [],
+  viewerVariantIndex: -1,
   viewerNeedsRefresh: false,
   viewerDirtyIds: new Set(),
   editor: null,

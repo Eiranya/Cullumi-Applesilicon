@@ -338,6 +338,20 @@ function variantFormatText(p, compact = false) {
     return `${formats.slice(0, 2).join(" + ")} +${formats.length - 2}`;
   return formats.join(" + ");
 }
+// 一个拍摄变体组（同一张曝光的 RAW + JPEG）在照片库里只占一张卡片。
+//
+// 折叠本身已经在后端的列表查询里完成了（见 photo_query_service 的
+// capture_variant_collapse_clause），所以前端**不再**按这个标记过滤一遍：后端已经
+// 按当前筛选条件判断过代表文件是否还在结果集里——只筛 RAW 时 JPEG 代表被筛掉，此时
+// RAW 会顶上成为唯一那张卡片，而后端返回的这一行 is_capture_variant 恰为 true。
+// 前端若再过滤一次，就会把仅剩的那张卡片也藏掉。
+//
+// 这个标记在前端的用途是另一件事：同步决定会写遍组内所有格式，但被折叠的文件并不
+// 各自占一个名额，调整「显示 N / 总数」时必须跳过它们，否则会重复计数。
+// 字节级完全重复、相似连拍组，以及没有变体分组的独立照片都不带该标记。
+function isFoldedVariant(photo) {
+  return photo?.is_capture_variant === true;
+}
 // 卡片图片框尺寸的唯一事实来源（与 web/css/base.css 的 .gallery 列宽一一对应）。
 // 列宽 215 − 卡片左右各 1px 边框（全局 box-sizing:border-box）= 图片框 213 CSS px。
 const CARD_COLUMN = 215;
@@ -500,6 +514,11 @@ async function syncViewerDecisions() {
 }
 function adjustUnloadedLibraryTotal(photo) {
   if (state.view !== "library") return;
+  // A folded variant file never had a card of its own, so its decision moving
+  // cannot change how many cards the library shows. Counting it here would
+  // push the "显示 N / 总数" denominator off by one per non-representative
+  // format in the group.
+  if (isFoldedVariant(photo)) return;
   const before = photoMatchesLibrary({
       ...photo,
       decision: photo.previous_decision || "",
@@ -519,7 +538,9 @@ function moveViewerPastAffected(affectedIds) {
       return;
     }
   }
-  const current = state.items[state.viewerIndex];
+  // 全部照片都受影响时无处可去，就地把决定状态刷新在当前显示的那一份上——
+// 它可能是折叠掉的格式，state.items 里没有。
+  const current = viewerCurrentPhoto();
   if (current) updateViewerDecision(current);
 }
 async function setDecision(id, decision, fromViewer = true) {
@@ -554,10 +575,17 @@ async function setDecision(id, decision, fromViewer = true) {
     const similarMember = state.similar.detail?.members.find(
       (item) => item.id === photo.id,
     );
+    // 查看器里已取回的变体格式是独立副本，决定后必须一起刷新，否则切回该格式
+    // 会显示旧的评分与建议。被折叠的格式不在 state.items 里，只能靠这里同步。
+    const viewerVariant = state.viewerVariants.find(
+      (item) => item.id === photo.id,
+    );
     if (loaded) {
       loadedIds.add(photo.id);
       Object.assign(loaded, photo);
     } else adjustUnloadedLibraryTotal(photo);
+    if (viewerVariant && viewerVariant !== loaded)
+      Object.assign(viewerVariant, photo);
     if (similarMember && similarMember !== loaded)
       Object.assign(similarMember, photo);
     updateCardDecision(photo.id, photo.decision);
@@ -593,7 +621,10 @@ async function setDecision(id, decision, fromViewer = true) {
     await advanceSimilarGroup(fromViewer && $("#viewer").open);
     return true;
   }
-  const p = state.items.find((item) => item.id === id);
+  // 查看器正在显示的那一份：可能是折叠掉的格式，它不在 state.items 里。
+  const p = fromViewer
+    ? viewerCurrentPhoto()
+    : state.items.find((item) => item.id === id);
   if (fromViewer && state.settings.auto_advance)
     moveViewerPastAffected(affectedIds);
   else if (fromViewer && p) updateViewerDecision(p);

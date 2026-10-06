@@ -300,6 +300,21 @@ def representative_photo_ids(
     return {mapped.get(photo_id, photo_id) for photo_id in requested}
 
 
+def variant_representative_ids(
+    conn: sqlite3.Connection, photo_ids: Iterable[int]
+) -> dict[int, int]:
+    """Map every requested photo to the representative of its variant group.
+
+    A photo outside any group maps to itself, which makes
+    ``representative_id != photo_id`` the one test for "this file is folded
+    into another file's card". The library needs that verdict on the decision
+    response too, not only when listing, because a decision on the card is
+    synced to every format in the group.
+    """
+    requested, mapped = _requested_memberships(conn, photo_ids)
+    return {photo_id: mapped.get(photo_id, photo_id) for photo_id in requested}
+
+
 def active_variant_photo_ids(
     conn: sqlite3.Connection, photo_id: int, sync_variants: bool
 ) -> list[int]:
@@ -495,4 +510,5 @@ __all__ = [
     "variant_memberships",
     "variant_metadata",
     "variant_metadata_from_rows",
+    "variant_representative_ids",
 ]

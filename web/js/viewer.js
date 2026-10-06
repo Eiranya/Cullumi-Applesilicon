@@ -326,22 +326,79 @@ async function saveMotionCover(source = "motion", timeMs = null) {
     button.disabled = false;
   }
 }
-function openViewer(i) {
-  if (!state.items.length) return;
-  stopViewerMotion();
-  state.viewerIndex = (i + state.items.length) % state.items.length;
-  const p = state.items[state.viewerIndex],
-    suggestion = viewerSuggestion(p),
+// 变体按钮上的格式标签。优先取文件名的扩展名（payload 里的 extension 是
+// 小写带点的原值）；路径中没有扩展名时退回 extension 字段。注意判断必须是
+// dot > slash 而不是 dot > max(dot, slash) —— 后者恒为假，标签会永远是空的。
+function viewerVariantLabel(photo) {
+  const path = String(photo.relative_path || ""),
+    dot = path.lastIndexOf("."),
+    slash = path.lastIndexOf("/");
+  return (dot > slash ? path.slice(dot + 1) : photo.extension || "")
+    .replace(/^\./, "")
+    .toUpperCase();
+}
+// 同一张曝光的 RAW + JPEG 在照片库中折叠成一张卡片，所以 state.items 里只有
+// 代表文件，被折叠的那一份连 id 都没有。查看器要切换格式就必须另外取回整组数据
+// （每种格式各自的完整 payload），否则切过去就没有文件名、尺寸和评分可显示。
+// RAW 可能还没跑出分析结果（quality_score 为 null、reason 为空），此时不能显示
+// "undefined 分" 或 "0 B"，而是整段略去。p._blinkLabel 只在相似视图里赋值，
+// 照片库中没有 blinks 段，因此这里的 undefined 是预期行为。
+function viewerMetaText(p) {
+  const parts = [],
+    width = Number(p.width) || 0,
+    height = Number(p.height) || 0;
+  if (width && height) parts.push(`${width} × ${height}`);
+  if (Number(p.size) > 0) parts.push(formatSize(p.size));
+  if (Number.isFinite(p.quality_score)) parts.push(`${p.quality_score} 分`);
+  if (p.reason) parts.push(String(p.reason));
+  if (p._blinkLabel) parts.push("眨眼");
+  if (p.motion?.error) parts.push("动态部分不可用");
+  return parts.join(" · ");
+}
+// 变体切换控件。徽章原本是一段「CR3 + JPG」的纯文本，现在每个格式各成一个
+// 按钮，中间仍以「 + 」相连：外观与文案一字不变，而每个格式都可点击切换。
+// 整组只有一份照片时退化成纯文本徽章（即从前的行为），不做无用的往返。
+function renderViewerVariantSwitch(p) {
+  const host = $("#viewerVariantBadge"),
+    items = state.viewerVariants;
+  const text = variantFormatText(p, true);
+  host.classList.toggle("hidden", !text && items.length < 2);
+  if (items.length < 2) {
+    host.textContent = text;
+    host.title = text ? `关联格式：${variantFormatText(p)}` : "";
+    host.removeAttribute("role");
+    return;
+  }
+  host.setAttribute("role", "group");
+  host.setAttribute("aria-label", "切换显示格式");
+  host.title = `点击切换显示格式（当前共 ${items.length} 种），或按 F 键`;
+  const nodes = [];
+  items.forEach((item, index) => {
+    if (index) nodes.push(` + `);
+    const active = state.viewerVariantIndex === index || item.id === p.id;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `viewer-variant-option${active ? " active" : ""}`;
+    button.textContent = viewerVariantLabel(item);
+    button.dataset.variantIndex = String(index);
+    button.setAttribute("aria-pressed", String(active));
+    nodes.push(button);
+  });
+  host.replaceChildren(...nodes);
+}
+// 渲染「当前这一份」照片的全部查看器状态。切换格式时必须走这里：用的是被选中
+// 格式自己的完整 payload，文件名/尺寸/评分/决定状态都会跟着换，而不只是换图。
+function renderViewerPhoto(p) {
+  const suggestion = viewerSuggestion(p),
     badge = $("#viewerBadge"),
     analysisBadge = $("#viewerAnalysisBadge"),
-    variantBadge = $("#viewerVariantBadge"),
     img = $("#viewerImage");
+  stopViewerMotion();
   resetViewerTransform();
   img.classList.remove("hidden");
   img.src = p.photo_url;
   $("#viewerName").textContent = p.relative_path.split("/").pop();
-  $("#viewerMeta").textContent =
-    `${p.width || 0} × ${p.height || 0} · ${formatSize(p.size || 0)}${Number.isFinite(p.quality_score) ? ` · ${p.quality_score} 分` : ""}${p.reason ? " · " + p.reason : ""}${p._blinkLabel ? " · 眨眼" : ""}${p.motion?.error ? " · 动态部分不可用" : ""}`;
+  $("#viewerMeta").textContent = viewerMetaText(p);
   if (p.media_type === "motion_photo") {
     badge.innerHTML = LIVE_PHOTO_ICON;
     badge.setAttribute("aria-label", "动态照片");
@@ -353,27 +410,91 @@ function openViewer(i) {
     analysisBadge.className = "viewer-badge hidden";
   }
   badge.className = `viewer-badge ${p.media_type === "motion_photo" ? "viewer-live-mark" : suggestion.kind ? `badge-${suggestion.kind}` : "hidden"}`;
-  const variantText = variantFormatText(p, true);
-  variantBadge.textContent = variantText;
-  variantBadge.title = variantText
-    ? `关联格式：${variantFormatText(p)}`
-    : "";
-  variantBadge.classList.toggle("hidden", !variantText);
+  renderViewerVariantSwitch(p);
   updateViewerDecision(p);
+  if (p.motion && !p.motion.error) setupMotionViewer(p);
+}
+function openViewer(i) {
+  if (!state.items.length) return;
+  state.viewerIndex = (i + state.items.length) % state.items.length;
+  // 换一张照片就回到该组的代表文件：格式选择是「这张照片」的临时状态。
+  state.viewerVariants = [];
+  state.viewerVariantIndex = -1;
+  const p = state.items[state.viewerIndex];
+  renderViewerPhoto(p);
   $("#viewerIndex").textContent =
     `${state.viewerIndex + 1} / ${state.items.length}`;
   if (!$("#viewer").open) $("#viewer").showModal();
-  if (p.motion && !p.motion.error) setupMotionViewer(p);
+  loadViewerVariants(p);
+}
+// 按需取回整组格式。只有 variant_extensions 超过一种时才发请求，独立照片
+// （绝大多数）不会为这个功能多付一次往返。失败时保持纯文本徽章，不打扰用户。
+async function loadViewerVariants(p) {
+  if ((p.variant_extensions || []).length < 2) return;
+  const photoId = p.id;
+  try {
+    const result = await json(
+      `/api/photo/variants?project_id=${state.project.id}&id=${photoId}`,
+    );
+    // 用户可能已经翻到下一张：过期响应直接丢弃，否则会把上一张的格式列表
+    // 装到当前照片上。
+    if (state.items[state.viewerIndex]?.id !== photoId) return;
+    state.viewerVariants = result.items || [];
+    // 落在被预览的那一份上，而不是默认第一项：代表文件未必是组内第一行。
+    const current = state.viewerVariants.findIndex(
+      (item) => item.id === photoId,
+    );
+    state.viewerVariantIndex = current >= 0 ? current : 0;
+    renderViewerPhoto(viewerCurrentPhoto());
+  } catch {
+    // 失败时保持纯文本徽章。切换格式是增强功能，取不到整组数据不该打断预览。
+    if (state.items[state.viewerIndex]?.id !== photoId) return;
+    state.viewerVariants = [];
+    state.viewerVariantIndex = -1;
+    renderViewerVariantSwitch(state.items[state.viewerIndex]);
+  }
+}
+function viewerCurrentPhoto() {
+  return (
+    state.viewerVariants[state.viewerVariantIndex] ||
+    state.items[state.viewerIndex]
+  );
+}
+// 在同一张曝光的各格式之间循环。组内只有一份时不做任何事，调用方据此决定
+// 是否吞掉这次按键。
+function cycleViewerVariant(step = 1) {
+  const total = state.viewerVariants.length;
+  if (total < 2) return false;
+  const base = state.viewerVariantIndex < 0 ? 0 : state.viewerVariantIndex;
+  const next = (base + step + total) % total;
+  if (next === state.viewerVariantIndex) return false;
+  state.viewerVariantIndex = next;
+  renderViewerPhoto(state.viewerVariants[next]);
+  return true;
 }
 const moveViewer = (d) => openViewer(state.viewerIndex + d);
 
 function bindViewerEvents() {
   $("#viewerPrev").onclick = () => moveViewer(-1);
   $("#viewerNext").onclick = () => moveViewer(1);
-  $("#viewerKeep").onclick = () =>
-    setDecision(state.items[state.viewerIndex].id, "keep");
-  $("#viewerRemove").onclick = () =>
-    setDecision(state.items[state.viewerIndex].id, "remove");
+  // 切换格式的点击入口。用事件委托，因为按钮是随整组数据一起重建的。
+  $("#viewerVariantBadge").addEventListener("click", (event) => {
+    const option = event.target.closest("[data-variant-index]");
+    if (!option) return;
+    event.preventDefault();
+    const index = Number(option.dataset.variantIndex);
+    if (index === state.viewerVariantIndex) return;
+    state.viewerVariantIndex = index;
+    renderViewerPhoto(state.viewerVariants[index]);
+  });
+  $("#viewerKeep").onclick = () => {
+    const p = viewerCurrentPhoto();
+    if (p) setDecision(p.id, "keep");
+  };
+  $("#viewerRemove").onclick = () => {
+    const p = viewerCurrentPhoto();
+    if (p) setDecision(p.id, "remove");
+  };
   $("#viewer").addEventListener("close", () => {
     stopViewerMotion();
     syncViewerDecisions().catch((error) => toast(error.message));

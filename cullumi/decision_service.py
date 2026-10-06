@@ -13,6 +13,7 @@ from .capture_variants import (
     active_variant_photo_ids,
     active_variant_rows,
     variant_metadata,
+    variant_representative_ids,
 )
 from .classification import project_photo_counts
 from .project_store import Project, connect_db
@@ -25,6 +26,11 @@ class DecisionUpdate:
     rows: list[Any]
     previous: dict[int, str]
     variant_extensions: dict[int, list[str]]
+    # photo_id -> representative_id, where a photo in no group maps to itself.
+    # The caller needs this to tell the UI which affected photos the library
+    # folds into one card: a synced decision touches every format in the group,
+    # but only the representative occupies a slot on screen.
+    variant_representatives: dict[int, int]
     project_counts: dict[str, Any]
 
 
@@ -69,9 +75,12 @@ def set_photo_decision(
             target_ids,
         ).fetchall()
         extensions = variant_metadata(conn, (int(row["id"]) for row in rows))
+        representatives = variant_representative_ids(
+            conn, (int(row["id"]) for row in rows)
+        )
         counts = project_photo_counts(conn)
     return DecisionUpdate(
-        photo_id, decision, rows, previous, extensions, counts
+        photo_id, decision, rows, previous, extensions, representatives, counts
     )
 
 

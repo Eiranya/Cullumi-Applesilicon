@@ -99,6 +99,32 @@
   display:none
 }
 
+/* 变体格式切换：徽章里的每个格式是一个按钮，当前格式高亮。
+   按钮必须显式清掉全局 button 的边框/背景，否则继承 base.css 的 9px 圆角
+   实心按钮样式，会把徽章撑成一个方块。 */
+.viewer .viewer-variant-option {
+  padding:1px 5px;
+  border:1px solid transparent;
+  border-radius:7px;
+  color:var(--muted);
+  background:transparent;
+  font-size:11px;
+  font-weight:700;
+  line-height:1.5
+}
+
+.viewer .viewer-variant-option:hover {
+  border-color:var(--line);
+  color:var(--ink);
+  background:var(--surface-hover)
+}
+
+.viewer .viewer-variant-option.active {
+  border-color:var(--border-hover);
+  color:var(--ink);
+  background:var(--surface-hover-strong)
+}
+
 .live-mark {
   display: inline-grid;
   place-items: center;
