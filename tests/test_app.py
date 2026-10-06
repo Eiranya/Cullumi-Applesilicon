@@ -432,6 +432,9 @@ class AppSafetyTests(unittest.TestCase):
             handler = object.__new__(app.Handler)
             handler._photo_row = mock.Mock(return_value=(project, row))
             handler._send_file = mock.Mock()
+            # api_photo now reads the optional `w` supply width off the query.
+            # This test pins the no-width default, so the query carries none.
+            handler._query = mock.Mock(return_value={})
 
             with mock.patch.object(
                 app, "ensure_display_preview", return_value=preview
@@ -451,6 +454,8 @@ class AppSafetyTests(unittest.TestCase):
             handler = object.__new__(app.Handler)
             handler._photo_row = mock.Mock(return_value=(project, row))
             handler._send_file = mock.Mock()
+            # Same as above: the no-width default path.
+            handler._query = mock.Mock(return_value={})
 
             with mock.patch.object(
                 app, "ensure_display_preview", side_effect=OSError("offline")

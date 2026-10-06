@@ -45,15 +45,23 @@ fi
 #
 # app.py                          WKWebView bootstrap; folder drag-and-drop wiring
 # cullumi/analysis_worker.py      worker restart cap raised (measured 13% gain)
-# cullumi/classification.py       quality reasons in plain words, not metric names
+# cullumi/capture_variants.py     capture-variant grouping (this port's feature)
+# cullumi/classification.py       quality reasons in plain words, not metric names;
+#                                 library counts folded to one per capture group
+#                                 so the sidebar matches the cards on screen
 # cullumi/config.py               macOS app-data dir; blink_gpu_enabled default
 # cullumi/decision_service.py     report which photos a synced decision folded
 #                                 away, so the library can show one card per
 #                                 capture group instead of one per format
 # cullumi/face_analysis.py        CoreML execution provider + CPU fallback
-# cullumi/http_api.py             platform-aware update message; GPU setting
+# cullumi/http_api.py             platform-aware update message; GPU setting;
+#                                 optional &w= supply width on /api/photo so the
+#                                 viewer loads a preview and fetches the
+#                                 original only on request
+# cullumi/media.py                RAW EXIF from the TIFF IFD chain
 # cullumi/native_dialogs.py       macOS file dialogs via pywebview
-# cullumi/photo_query_service.py  expose similarity-group processing status
+# cullumi/photo_query_service.py  expose similarity-group processing status;
+#                                 per-photo preview_url alongside photo_url
 # cullumi/settings_service.py     accept blink_gpu_enabled in the settings route
 # cullumi/similarity.py           derive the group processing status
 # cullumi/updates.py              .dmg whitelist; winreg guarded
@@ -67,20 +75,23 @@ fi
 #                                 predictable (preview-sharpness / PRD P0-1)
 # web/css/home.css                drag-and-drop highlight for the empty state
 # web/css/workspace.css           group processing-status badge
-# web/css/viewer.css              viewer: the capture-variant format switch
-#                                 renders each format inside the existing
-#                                 variant badge as its own button, so the
-#                                 badge needs an active/hover style
-# web/index.html                  hardware-acceleration switch; plain-word labels
-# web/js/app.js                   bind the drag-and-drop affordance; F cycles the
-#                                 previewed capture-variant format
+# web/css/viewer.css              viewer: loading indicator for the on-demand
+#                                 original, the 1:1 / fit / view-original
+#                                 buttons, and the scale-state hint line
+# web/index.html                  hardware-acceleration switch; plain-word labels;
+#                                 viewer zoom controls and loading indicator
+# web/js/app.js                   bind the drag-and-drop affordance; F loads the
+#                                 original, 1 toggles 1:1, 0 fits the window
 # web/js/gallery.js               refresh the group badge after a decision
 # web/js/runtime.js               statusFilter in the shared view state
 # web/js/session.js               GPU status on boot; drop accept/reject entry points
 # web/js/settings.js              platform-aware update text; GPU switch handler
 # web/js/similar.js               render + live-update the group status badge
-# web/js/viewer.js                viewer: switch between RAW and JPEG of one
-#                                 exposure, using each format's own payload
+# web/js/viewer.js                viewer: on-demand original + true 1:1 viewing
+#                                 with an honest interpolated/original-pixel
+#                                 hint. The RAW/JPEG format switch that used to
+#                                 live here was withdrawn after user trials;
+#                                 the capture-variant badge is now plain text.
 EXPECTED_DIFFER="app.py
 cullumi/__init__.py
 cullumi/analysis_worker.py
@@ -159,6 +170,8 @@ models"
 #   transition the new default no longer exercises.
 #
 # tests/test_capture_variants.py
+#   Two entries, both deliberate.
+#
 #   `test_strict_grouping_and_representative_selection` asserted that files with
 #   the same stem in different directories never pair. That encoded a limitation
 #   the owner asked to lift: RAW and JPEG of one exposure are routinely filed
@@ -167,6 +180,18 @@ models"
 #   suite covers both the wider behaviour and its new failure mode -- the same
 #   stem across two unrelated events must NOT pair. The existing same-directory
 #   assertions are unchanged.
+#
+#   Second: the RAW/JPEG preview format switch shipped in 1.1.0 and was
+#   withdrawn after user trials (a browser cannot decode RAW, so switching only
+#   ever produced a worse or blank frame). Its twelve tests went with it, and
+#   `test_folding_does_not_change_photo_or_format_totals` was rewritten as
+#   `test_library_counts_fold_but_format_counts_stay_per_file`: the product
+#   owner reversed the earlier ruling that the counts describe the disk. The
+#   sidebar now counts cards (one per capture group) while the format tallies
+#   still count files, and the new tests pin both bases plus the sum identities
+#   the sidebar's arithmetic depends on. New tests for the withdrawal, the
+#   on-demand preview/1:1 work, and the counting basis live in the same file
+#   rather than a new one.
 #
 # tests/test_media.py
 #   `open_image` returned a hardcoded "" for RAW, so `taken` was empty for every
@@ -198,10 +223,14 @@ models"
 #   dispatch test walks real paths through relative_to().
 #
 # tests/test_app.py
+#   Two entries.
 #   test_api_photo_builds_a_high_resolution_tiff_preview compared mock call
 #   arguments against unresolved paths while api_photo resolves internally, so
 #   the mock never matched. The expected paths are now built from a resolved
 #   root; the assertion itself is unchanged.
+#   The two api_photo tests now also stub _query: the handler reads the optional
+#   `w` supply width off the query, and both tests pin the no-width default.
+#   Only the stub was added; no assertion was weakened.
 #
 # models/ has no entries and is expected to stay fully identical.
 AUTHORIZED_FROZEN="tests/test_analysis_worker.py

@@ -82,6 +82,9 @@
   display: none;
 }
 
+/* 变体徽章：纯文字提示。同一张曝光的 RAW+JPEG 折叠成一张卡片，这里如实告诉
+   用户本组含哪些格式；预览始终是可解码的那一份，不提供格式切换（原切换功能已
+   撤回），因此没有按钮态、没有 hover、没有 active。 */
 .viewer .viewer-variant-badge {
   display:inline-flex;
   align-items:center;
@@ -99,30 +102,81 @@
   display:none
 }
 
-/* 变体格式切换：徽章里的每个格式是一个按钮，当前格式高亮。
-   按钮必须显式清掉全局 button 的边框/背景，否则继承 base.css 的 9px 圆角
-   实心按钮样式，会把徽章撑成一个方块。 */
-.viewer .viewer-variant-option {
-  padding:1px 5px;
-  border:1px solid transparent;
-  border-radius:7px;
-  color:var(--muted);
-  background:transparent;
-  font-size:11px;
-  font-weight:700;
-  line-height:1.5
+/* 1:1 状态提示。如实区分「原始像素」与「插值放大」——用户投诉的正是放大后发糊，
+   而原因不是照片不清晰，是浏览器在插值一张缩小的位图。这行字必须说清楚。 */
+.viewer .viewer-scale-hint {
+  display: block;
+  min-height: 15px;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 11px
 }
 
-.viewer .viewer-variant-option:hover {
-  border-color:var(--line);
-  color:var(--ink);
-  background:var(--surface-hover)
+.viewer .viewer-scale-hint-exact {
+  color: var(--keep)
 }
 
-.viewer .viewer-variant-option.active {
-  border-color:var(--border-hover);
-  color:var(--ink);
-  background:var(--surface-hover-strong)
+/* 原图载入失败时的说明。必须留在画面上而不是只弹一次 toast：用户是在看细节，
+   看不到原因就会以为「原图就是这样糊」。 */
+.viewer .viewer-original-hint {
+  display: block;
+  min-height: 0;
+  color: var(--red);
+  font-size: 11px
+}
+
+.viewer .viewer-original-hint:empty {
+  display: none
+}
+
+/* 原图按需加载的指示。24MB 的文件在本地回环上也要等一会儿，没有它用户会以为
+   预览器卡死了。 */
+.viewer .viewer-loading {
+  position: absolute;
+  z-index: 4;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 8px 14px;
+  border-radius: 10px;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--card) 92%, transparent);
+  font-size: 12px;
+  pointer-events: none
+}
+
+.viewer .viewer-loading.hidden {
+  display: none
+}
+
+/* 缩放与原图按钮。比决策按钮窄：它们是「怎么看」而不是「做什么决定」。 */
+.viewer .viewer-zoom {
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink);
+  background: var(--card);
+  font-size: 12px;
+  font-weight: 600
+}
+
+.viewer .viewer-zoom:hover:not(:disabled) {
+  border-color: var(--border-hover);
+  background: var(--surface-hover)
+}
+
+.viewer .viewer-zoom:disabled {
+  opacity: 0.55;
+  cursor: default
+}
+
+/* 已载入原图：给一个持续可见的确认，而不是短暂toast。原图可能驻留整个会话，
+   用户需要随时知道「现在看的是真像素」。 */
+.viewer .viewer-zoom.viewer-original-loaded {
+  border-color: var(--border-hover);
+  background: var(--surface-hover-strong);
+  color: var(--ink)
 }
 
 .live-mark {

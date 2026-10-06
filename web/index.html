@@ -133,7 +133,7 @@
     <button class="close" data-close aria-label="关闭预览"><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="#viewer-close"></use></svg></button>
     <button class="side prev" id="viewerPrev" aria-label="上一张"><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="#viewer-prev"></use></svg></button>
     <figure>
-      <div class="viewer-media"><img id="viewerImage" draggable="false"><video id="viewerVideo" class="hidden" muted playsinline preload="metadata"></video></div>
+      <div class="viewer-media"><img id="viewerImage" draggable="false"><video id="viewerVideo" class="hidden" muted playsinline preload="metadata"></video><span id="viewerLoading" class="viewer-loading hidden" role="status" aria-live="polite">正在载入原图…</span></div>
       <div id="motionControls" class="motion-controls hidden">
         <button id="motionPlay" class="motion-play-button" type="button" aria-label="暂停" title="暂停"><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="#motion-pause"></use></svg></button>
         <span id="motionTime">0:00 / 0:00</span>
@@ -146,10 +146,10 @@
         <button id="motionSetCover" class="motion-set-cover-button" type="button" aria-label="设为封面" title="设为封面"><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="#motion-set-cover"></use></svg></button>
         <button id="motionResetCover" class="motion-reset-button" type="button" aria-label="恢复原始封面" title="恢复原始封面"><svg viewBox="0 0 1024 1024" aria-hidden="true"><use transform="translate(1024 0) scale(-1 1)" href="#motion-reset"></use></svg></button>
       </div>
-      <figcaption><div class="viewer-title-line"><span id="viewerBadge" class="viewer-badge hidden"></span><span id="viewerAnalysisBadge" class="viewer-badge hidden"></span><span id="viewerVariantBadge" class="viewer-variant-badge hidden"></span><b id="viewerName"></b></div><span id="viewerMeta"></span></figcaption>
+      <figcaption><div class="viewer-title-line"><span id="viewerBadge" class="viewer-badge hidden"></span><span id="viewerAnalysisBadge" class="viewer-badge hidden"></span><span id="viewerVariantBadge" class="viewer-variant-badge hidden"></span><b id="viewerName"></b></div><span id="viewerMeta"></span><span id="viewerScaleHint" class="viewer-scale-hint"></span><span id="viewerOriginalHint" class="viewer-original-hint"></span></figcaption>
     </figure>
     <button class="side next" id="viewerNext" aria-label="下一张"><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="#viewer-next"></use></svg></button>
-    <footer><button id="viewerKeep" class="viewer-decision viewer-keep">W / ↑ 保留</button><span id="viewerIndex"></span><button id="viewerRemove" class="viewer-decision viewer-remove">S / ↓ 移除</button></footer>
+    <footer><button id="viewerKeep" class="viewer-decision viewer-keep">W / ↑ 保留</button><span id="viewerIndex"></span><button id="viewerRemove" class="viewer-decision viewer-remove">S / ↓ 移除</button><button id="viewerOriginal" class="viewer-zoom" type="button" aria-label="载入原始文件" title="载入原图（F）">查看原图</button><button id="viewerOneToOne" class="viewer-zoom" type="button" aria-label="切换 1:1 原始像素" title="1:1 原始像素（1）">1:1</button><button id="viewerFit" class="viewer-zoom" type="button" aria-label="适应窗口" title="适应窗口（0）">适应</button></footer>
   </dialog>
 
   <dialog id="settings" class="panel-dialog">

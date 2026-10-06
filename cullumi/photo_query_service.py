@@ -39,6 +39,10 @@ PHOTO_SORT_EXPRESSIONS = {
 }
 PHOTO_SORT_DIRECTIONS = {"asc": "ASC", "desc": "DESC"}
 SIMILAR_GROUP_PAGE_LIMIT = 500
+# 查看器首屏预览图的长边上限。取 2048 而不是原图尺寸：常见的 4~7K 照片缩到这个
+# 尺寸后，在任何一块笔记本屏幕上都已经铺满甚至超出，肉眼看不出与原图的差别，
+# 但体积从实测中位 19.5MB 掉到 1MB 上下（原图走 JPEG q92 重编码）。
+VIEWER_PREVIEW_WIDTH = 2048
 
 
 def capture_variant_collapse_clause(where: str) -> str:
@@ -195,6 +199,14 @@ class PhotoQueryService:
             f"/api/photo?project_id={project_id}&id={row['id']}"
             f"&token={self.token}{suffix}"
         )
+        # 首屏用的预览图与「查看原图」分开：原图实测可达 24MB，逐张下发既慢又
+        # 占带宽，而用户在预览尺寸下根本看不清差别。preview_url 指向同一套
+        # ensure_display_preview 缓存（按目标宽度缓存，见 media.display_preview_path），
+        # 原图仍由 photo_url 按需拉取——只有真正要 1:1 判细节时才付这个代价。
+        data["preview_url"] = (
+            f"/api/photo?project_id={project_id}&id={row['id']}"
+            f"&token={self.token}&w={VIEWER_PREVIEW_WIDTH}{suffix}"
+        )
         if row["media_type"] == "motion_photo":
             data["motion"] = {
                 "kind": row["motion_kind"],
@@ -291,50 +303,6 @@ class PhotoQueryService:
                 )
                 for row in rows
             ],
-        }
-
-    def capture_variants(self, query: dict[str, list[str]]) -> dict[str, Any]:
-        """Every format of one photo's capture-variant group, in full.
-
-        The library folds a RAW+JPEG pair into a single card, so the browser
-        only ever holds the representative. That is right for a grid but it
-        leaves the folded format with no way in: no id, no filename, no URL.
-        The viewer needs all of them to switch between formats, and it needs
-        each sibling's *own* analysis -- a RAW's sharpness and score are not
-        the JPEG's -- so this returns whole payloads rather than a list of
-        extensions.
-
-        Deliberately a separate endpoint instead of a field on `photos()`: the
-        listing is fetched on every scroll page, and sibling payloads would
-        ride along for photos the user never previews.
-        """
-        project_id = query.get("project_id", [""])[0]
-        photo_id = int(query.get("id", ["0"])[0])
-        project = self.manager.from_id(project_id)
-        profile = self.config.get_profile(project.profile_id)
-        with closing(connect_db(project.db_path)) as conn:
-            source = conn.execute(
-                "SELECT * FROM photos WHERE id=? AND status='active'",
-                (photo_id,),
-            ).fetchone()
-            if not source:
-                raise ValueError("照片不存在或当前不可用")
-            variant_rows = active_variant_rows(conn, (photo_id,))
-            extensions = variant_metadata_from_rows(variant_rows)
-        rows = variant_rows.get(photo_id) or [source]
-        return {
-            "items": [
-                self.photo_payload(
-                    project_id,
-                    row,
-                    profile,
-                    extensions.get(int(row["id"]), []),
-                    representative_id=int(row["capture_representative_id"])
-                    if "capture_representative_id" in row.keys()
-                    else photo_id,
-                )
-                for row in rows
-            ]
         }
 
     def similar_groups(self, query: dict[str, list[str]]) -> dict[str, Any]:

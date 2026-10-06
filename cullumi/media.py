@@ -300,11 +300,24 @@ def open_image(
                 oriented.close()
 
 
-def display_preview_path(source: Path, thumbnail: Path) -> Path:
-    """Return a cache path tied to the source file's current contents."""
+def display_preview_path(
+    source: Path,
+    thumbnail: Path,
+    max_size: tuple[int, int] = DISPLAY_PREVIEW_MAX_SIZE,
+) -> Path:
+    """Return a cache path tied to the source file's current contents.
+
+    ``max_size`` is part of the fingerprint, not just of the build: a caller
+    asking for a 1200px rendition and another asking for the 2560px default
+    must not share one file, or whichever was built first would silently be
+    served to the other (a "preview" that is blurrier than it claims, or a
+    full-size render downloaded for a thumbnail-sized box).
+    """
     stat = source.stat()
     fingerprint = hashlib.sha1(
-        f"{stat.st_size}:{stat.st_mtime_ns}".encode("ascii")
+        f"{stat.st_size}:{stat.st_mtime_ns}:{max_size[0]}x{max_size[1]}".encode(
+            "ascii"
+        )
     ).hexdigest()[:12]
     return thumbnail.with_name(f"{thumbnail.stem}.display-{fingerprint}.jpg")
 
@@ -312,14 +325,31 @@ def display_preview_path(source: Path, thumbnail: Path) -> Path:
 _DISPLAY_LOCKS = [threading.Lock() for _ in range(64)]
 
 
-def ensure_display_preview(source: Path, thumbnail: Path) -> Path:
-    with _DISPLAY_LOCKS[hash(str(thumbnail)) % len(_DISPLAY_LOCKS)]:
-        return _ensure_display_preview(source, thumbnail)
+def ensure_display_preview(
+    source: Path,
+    thumbnail: Path,
+    *,
+    max_size: tuple[int, int] = DISPLAY_PREVIEW_MAX_SIZE,
+) -> Path:
+    """Build and atomically cache a browser-friendly preview of ``source``.
+
+    ``max_size`` bounds the longest edge of the rendered JPEG. It defaults to
+    :data:`DISPLAY_PREVIEW_MAX_SIZE`, which is what the viewer wants for a
+    full-screen 1:1 look; a caller that only needs a smaller rendition (a
+    scaled-down stage, a low-DPR display) passes a smaller bound and pays for
+    a correspondingly smaller file.
+    """
+    if max_size[0] <= 0 or max_size[1] <= 0:
+        raise ValueError("预览图尺寸必须为正数")
+    with _DISPLAY_LOCKS[hash((str(thumbnail), max_size)) % len(_DISPLAY_LOCKS)]:
+        return _ensure_display_preview(source, thumbnail, max_size)
 
 
-def _ensure_display_preview(source: Path, thumbnail: Path) -> Path:
+def _ensure_display_preview(
+    source: Path, thumbnail: Path, max_size: tuple[int, int]
+) -> Path:
     """Build and atomically cache a browser-friendly, high-resolution preview."""
-    target = display_preview_path(source, thumbnail)
+    target = display_preview_path(source, thumbnail, max_size)
     if target.is_file():
         return target
 
@@ -328,7 +358,7 @@ def _ensure_display_preview(source: Path, thumbnail: Path) -> Path:
     image: Image.Image | None = None
     try:
         image, _ = open_image(source)
-        image.thumbnail(DISPLAY_PREVIEW_MAX_SIZE, Image.Resampling.LANCZOS)
+        image.thumbnail(max_size, Image.Resampling.LANCZOS)
         image.save(temporary, "JPEG", quality=92, optimize=True)
         temporary.replace(target)
     finally:

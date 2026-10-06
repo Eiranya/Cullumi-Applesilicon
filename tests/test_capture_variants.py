@@ -19,11 +19,21 @@ from cullumi.capture_variants import (
 )
 from cullumi.classification import project_photo_counts
 from cullumi.config import BUILTIN_PROFILES, ConfigStore
+from cullumi.media import (
+    DISPLAY_PREVIEW_MAX_SIZE,
+    display_preview_path,
+    ensure_display_preview,
+)
+from cullumi.photo_query_service import (
+    VIEWER_PREVIEW_WIDTH,
+    PhotoQueryService,
+)
 from cullumi.project_store import ProjectManager, connect_db
 from cullumi.scanner import Scanner
 from cullumi.similarity import SimilarityGroupCache
 from cullumi.workflows import (
     apply_quarantine,
+    clear_decisions,
     export_decisions,
     import_decisions,
     mark_ai_remove_suggestions,
@@ -1444,17 +1454,19 @@ class CaptureVariantFoldingTests(unittest.TestCase):
     # C. Existing behaviour that must survive the change
     # ------------------------------------------------------------------
 
-    def test_folding_does_not_change_photo_or_format_totals(self) -> None:
-        """The filter belongs in the listing, not in the counts.
+    def test_library_counts_fold_but_format_counts_stay_per_file(self) -> None:
+        """The two counting bases, side by side.
 
-        `project_photo_counts` and `format_category_counts` describe what is
-        on disk. If folding leaked into them, quarantining or exporting would
-        silently skip the folded file.
+        `project_photo_counts` describes the library the user sees, and the
+        library folds a RAW+JPEG pair into one card -- so it counts two cards
+        here (the group plus the PNG). `format_category_counts` describes what
+        is on disk, so it still counts all three files: "how many RAW do I
+        have" must not silently become "how many groups contain a RAW".
         """
         with closing(connect_db(self.project.db_path)) as conn:
             insert_photo(conn, "IMG_4001.JPG", decision="keep")
             insert_photo(
-                conn, "raw/IMG_4001.ARW", decision="remove", size=20_000_000
+                conn, "raw/IMG_4001.ARW", decision="keep", size=20_000_000
             )
             insert_photo(conn, "IMG_4002.PNG")
             rebuild_capture_variants(conn)
@@ -1465,9 +1477,11 @@ class CaptureVariantFoldingTests(unittest.TestCase):
                 for entry in format_category_counts(conn)
             }
 
-        self.assertEqual(counts["total"], 3)
-        self.assertEqual(counts["library_counts"]["readable"], 3)
-        self.assertEqual(counts["decisions"], {"keep": 1, "remove": 1})
+        # 3 files -> 2 cards.
+        self.assertEqual(counts["total"], 2)
+        self.assertEqual(counts["library_counts"]["readable"], 2)
+        self.assertEqual(counts["library_counts"]["keep"], 1)
+        # Format tallies are unaffected by folding.
         self.assertEqual(formats, {"raw": 1, "jpeg": 1, "png": 1})
 
     def test_deciding_on_a_card_still_reaches_the_whole_group(self) -> None:
@@ -1692,14 +1706,13 @@ class CaptureVariantFoldingTests(unittest.TestCase):
         self.assertNotIn(bystander, self.library_ids())
 
 
-class CaptureVariantViewerTests(unittest.TestCase):
-    """The viewer's format switch over a folded capture-variant group.
+class CaptureVariantCountingBasisTests(unittest.TestCase):
+    """The library counts cards; the format counts count files.
 
-    Folding hides the RAW from the library listing, so the browser holds no id
-    and no payload for it. The viewer therefore asks for the whole group
-    separately and switches between *complete* payloads -- a switch that only
-    swapped `img.src` would show the JPEG's filename and score next to the
-    RAW's pixels.
+    Folding a RAW+JPEG pair into one card made the sidebar disagree with the
+    grid: 734 cards were reported as 1468 photos. The fix gives the two
+    aggregates deliberately different bases, so both questions can be answered
+    at once -- and pins the sum identities that keep the sidebar coherent.
     """
 
     def setUp(self) -> None:
@@ -1716,7 +1729,262 @@ class CaptureVariantViewerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def application(self) -> http_api.ApplicationContext:
+    def pair(self, stem: str = "IMG_8001", **kwargs: Any) -> tuple[int, int]:
+        """A RAW + JPEG pair of one exposure, rebuilt and committed."""
+        with closing(connect_db(self.project.db_path)) as conn:
+            jpg = insert_photo(
+                conn, f"{stem}.JPG", taken="2026:10:02 17:59:44", **kwargs
+            )
+            raw = insert_photo(
+                conn,
+                f"raw/{stem}.ARW",
+                taken="2026:10:02 17:59:44",
+                size=20_000_000,
+            )
+            rebuild_capture_variants(conn)
+            conn.commit()
+        return jpg, raw
+
+    def counts(self) -> dict[str, Any]:
+        with closing(connect_db(self.project.db_path)) as conn:
+            return project_photo_counts(conn)
+
+    def formats(self) -> dict[str, int]:
+        with closing(connect_db(self.project.db_path)) as conn:
+            return {
+                entry["id"]: entry["count"]
+                for entry in format_category_counts(conn)
+            }
+
+    # ------------------------------------------------------------------
+    # A. One group counts once
+    # ------------------------------------------------------------------
+
+    def test_a_group_of_two_files_counts_as_one_card(self) -> None:
+        """The bug, pinned: 1 RAW + 1 JPEG is ONE card."""
+        self.pair()
+        counts = self.counts()
+        self.assertEqual(counts["total"], 1)
+        self.assertEqual(counts["library_counts"]["readable"], 1)
+        self.assertEqual(counts["library_counts"]["undecided"], 1)
+
+    def test_the_unfolded_photo_count_is_exactly_half(self) -> None:
+        """Two independent pairs must halve, not merely shift by one.
+
+        A constant offset would pass the single-pair test above while still
+        miscounting a real library, so this asserts the ratio.
+        """
+        self.pair("IMG_8002")
+        self.pair("IMG_8003")
+        self.assertEqual(self.counts()["total"], 2)
+        with closing(connect_db(self.project.db_path)) as conn:
+            files = conn.execute(
+                "SELECT COUNT(*) FROM photos WHERE status='active'"
+            ).fetchone()[0]
+        self.assertEqual(files, 4)
+
+    def test_a_photo_outside_any_group_is_still_counted(self) -> None:
+        """Folding must not become a filter that hides photos.
+
+        A lone JPEG belongs to no group, so it is its own representative and
+        must appear exactly once. This is the reverse proof that the dedup is
+        scoped to real groups rather than to, say, every non-RAW file.
+        """
+        with closing(connect_db(self.project.db_path)) as conn:
+            insert_photo(conn, "LONE8004.JPG")
+            insert_photo(conn, "LONE8005.PNG")
+            rebuild_capture_variants(conn)
+            conn.commit()
+        self.assertEqual(self.counts()["total"], 2)
+
+    def test_format_counts_still_count_every_file(self) -> None:
+        """"How many RAW do I have" is a question about the disk.
+
+        Folding must not leak into this aggregate: the user filters by RAW to
+        find originals to process elsewhere, and a per-card count would
+        understate that by silently hiding the JPEGs.
+        """
+        self.pair()
+        self.assertEqual(self.formats(), {"raw": 1, "jpeg": 1})
+
+    # ------------------------------------------------------------------
+    # B. Decisions inside one group
+    # ------------------------------------------------------------------
+
+    def test_a_decided_group_counts_the_decision_once(self) -> None:
+        """Syncing writes one decision to both files; it must count once."""
+        self.pair()
+        set_photo_decision(self.project, self.counts() and 1, "keep", True)
+        counts = self.counts()
+        self.assertEqual(counts["library_counts"]["keep"], 1)
+        self.assertEqual(counts["library_counts"]["undecided"], 0)
+        self.assertEqual(counts["decisions"], {"keep": 1})
+
+    def test_an_unsynced_group_counts_the_representative_s_decision(self) -> None:
+        """The deliberate call: when members disagree, the card decides.
+
+        With syncing OFF the JPEG can be `keep` while the RAW stays undecided.
+        The screen shows ONE card, wearing the representative's badge, so the
+        sidebar must count that card -- not the group as both decided and
+        undecided, which would break the identity asserted below.
+        """
+        jpg, raw = self.pair()
+        set_photo_decision(self.project, jpg, "keep", False)
+        with closing(connect_db(self.project.db_path)) as conn:
+            divergent = {
+                int(row["id"]): str(row["decision"] or "")
+                for row in conn.execute(
+                    "SELECT id,decision FROM photos WHERE id IN (?,?)",
+                    (jpg, raw),
+                )
+            }
+        # The premise must actually hold, or this test proves nothing.
+        self.assertEqual(divergent, {jpg: "keep", raw: ""})
+
+        counts = self.counts()
+        self.assertEqual(counts["total"], 1)
+        self.assertEqual(counts["library_counts"]["readable"], 1)
+        self.assertEqual(counts["library_counts"]["keep"], 1)
+        self.assertEqual(counts["library_counts"]["undecided"], 0)
+        # The decisive consequence: the group is in exactly one bucket.
+        self.assertEqual(
+            counts["library_counts"]["keep"]
+            + counts["library_counts"]["undecided"],
+            counts["library_counts"]["readable"],
+        )
+
+    def test_the_representative_is_the_readable_non_raw_file(self) -> None:
+        """Why representative-based counting is the consistent choice.
+
+        `_representative_sort_key` ranks readable non-RAW highest, so the card
+        on screen is the JPEG. Counting any other member would mean the number
+        beside the card describes a file the user cannot see.
+        """
+        with closing(connect_db(self.project.db_path)) as conn:
+            jpg = insert_photo(
+                conn, "IMG_8006.JPG", taken="2026:10:02 17:59:44", decision="keep"
+            )
+            raw = insert_photo(
+                conn,
+                "raw/IMG_8006.ARW",
+                taken="2026:10:02 17:59:44",
+                size=20_000_000,
+                decision="remove",
+            )
+            rebuild_capture_variants(conn)
+            conn.commit()
+            representative = conn.execute(
+                "SELECT representative_id FROM capture_variant_members"
+                " WHERE photo_id=?",
+                (raw,),
+            ).fetchone()[0]
+        self.assertEqual(int(representative), jpg)
+        # And the counts follow that card, not the folded RAW.
+        counts = self.counts()
+        self.assertEqual(counts["decisions"], {"keep": 1})
+
+    # ------------------------------------------------------------------
+    # C. The sum identities the sidebar depends on
+    # ------------------------------------------------------------------
+
+    def assert_sum_identities(self, counts: dict[str, Any]) -> None:
+        """Every identity the sidebar's arithmetic depends on.
+
+        These are the assertions that keep the UI from showing numbers that
+        cannot be reconciled: the sidebar renders `keep`, `remove` and
+        `undecided` as sibling tallies under `readable`, and a user who adds
+        two of them to get the third must not get a different answer.
+        """
+        library = counts["library_counts"]
+        self.assertEqual(
+            library["keep"] + library["remove"] + library["undecided"],
+            library["readable"],
+            f"decisions must partition readable: {library}",
+        )
+        self.assertEqual(
+            library["readable"] + library["unreadable"],
+            counts["total"],
+            f"readable + unreadable must equal total: {library}",
+        )
+        # ai_pending is a SUBSET of undecided, ai_remove_pending of ai_pending.
+        self.assertLessEqual(library["ai_pending"], library["undecided"])
+        self.assertLessEqual(library["ai_remove_pending"], library["ai_pending"])
+        self.assertLessEqual(library["unreadable"], counts["total"])
+        for name in ("keep", "remove"):
+            self.assertLessEqual(counts["decisions"].get(name, 0), library[name])
+
+    def test_identities_hold_across_a_mixed_library(self) -> None:
+        """Every bucket at once, not one at a time.
+
+        The identities are easy to satisfy in a library that only ever has
+        keep-or-nothing. This fixture mixes decided groups, undecided groups,
+        unreadable files and a lone photo, which is what a real library looks
+        like after a partial review.
+        """
+        self.pair("IMG_8010", decision="keep")
+        self.pair("IMG_8011", suggestion="remove")
+        self.pair("IMG_8012")
+        with closing(connect_db(self.project.db_path)) as conn:
+            insert_photo(conn, "LONE8013.JPG")
+            insert_photo(
+                conn, "BROKEN8014.JPG", error="无法解码", suggestion="unreadable"
+            )
+            gone = insert_photo(conn, "GONE8015.JPG")
+            # A file that has gone missing on disk: still a row, no longer part
+            # of the library, so it must drop out of every tally.
+            conn.execute(
+                "UPDATE photos SET status='missing' WHERE id=?", (gone,)
+            )
+            rebuild_capture_variants(conn)
+            conn.commit()
+        counts = self.counts()
+        # 3 groups + 1 lone + 1 unreadable = 5 cards; the missing file is not
+        # active and must not be counted at all.
+        self.assertEqual(counts["total"], 5)
+        self.assertEqual(counts["library_counts"]["readable"], 4)
+        self.assertEqual(counts["library_counts"]["unreadable"], 1)
+        self.assert_sum_identities(counts)
+
+    def test_identities_hold_for_an_empty_library(self) -> None:
+        """Zero rows must not produce None-vs-0 drift in the arithmetic."""
+        self.assert_sum_identities(self.counts())
+        self.assertEqual(self.counts()["total"], 0)
+
+    def test_clearing_every_decision_returns_the_group_to_undecided(self) -> None:
+        """The round trip through the UI's own action."""
+        self.pair("IMG_8020", decision="keep")
+        self.assertEqual(self.counts()["library_counts"]["keep"], 1)
+        clear_decisions(self.project)
+        counts = self.counts()
+        self.assertEqual(counts["library_counts"]["keep"], 0)
+        self.assertEqual(counts["library_counts"]["undecided"], 1)
+        self.assert_sum_identities(counts)
+
+
+class CaptureVariantPreviewRenditionTests(unittest.TestCase):
+    """The viewer loads a preview first and the original only on request.
+
+    Originals measured at a 19.5MB median (24MB max) for this library, so
+    sending one per photo opened is pure waste; but a 1:1 detail check needs
+    real pixels. Both halves are pinned here, plus the guarantee that folding
+    is untouched by any of it.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.photos = self.root / "photos"
+        self.photos.mkdir()
+        self.config = ConfigStore(self.root / "config.json")
+        self.config.data["default_cache_root"] = str(self.root / "cache")
+        self.config.save()
+        self.manager = ProjectManager(self.config)
+        self.project = self.manager.open(str(self.photos))
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def queries(self) -> "PhotoQueryService":
         scanner = Scanner(self.config, self.manager)
         return http_api.ApplicationContext(
             self.config,
@@ -1725,41 +1993,276 @@ class CaptureVariantViewerTests(unittest.TestCase):
             SimilarityGroupCache(),
             "test-token",
             Path("web"),
-        )
+        ).photo_queries
 
-    def variants(self, photo_id: int) -> dict[str, Any]:
-        """Query the group exactly as the viewer's format switch does."""
-        return self.application().photo_queries.capture_variants(
+    def payload(self, photo_id: int) -> dict[str, Any]:
+        listing = self.queries().photos(
             {
                 "project_id": [self.project.project_id],
-                "id": [str(photo_id)],
+                "decisions": ["all"],
+                "ai_states": ["all"],
+                "formats": ["all"],
             }
         )
+        return next(
+            item for item in listing["items"] if int(item["id"]) == photo_id
+        )
 
-    def pair(self) -> tuple[int, int]:
-        """A RAW + JPEG pair of one exposure, rebuilt and committed."""
+    def test_preview_url_is_a_distinct_smaller_rendition(self) -> None:
+        with closing(connect_db(self.project.db_path)) as conn:
+            photo_id = insert_photo(conn, "IMG_9001.JPG")
+            rebuild_capture_variants(conn)
+            conn.commit()
+        item = self.payload(photo_id)
+        self.assertIn("preview_url", item)
+        self.assertIn(f"w={VIEWER_PREVIEW_WIDTH}", item["preview_url"])
+        # The two URLs must not be the same string, or the preview is dead code
+        # and every open would still pull the original.
+        self.assertNotEqual(item["preview_url"], item["photo_url"])
+        self.assertRegex(item["photo_url"], rf"[?&]id={photo_id}(&|$)")
+
+    def test_the_preview_width_is_bounded(self) -> None:
+        """A preview bound must be a real bound.
+
+        VIEWER_PREVIEW_WIDTH is the whole point of the feature: if it were 0,
+        negative or absurd the preview would be unusable and the change would
+        be a net loss.
+        """
+        self.assertGreater(VIEWER_PREVIEW_WIDTH, 0)
+        self.assertLessEqual(VIEWER_PREVIEW_WIDTH, DISPLAY_PREVIEW_MAX_SIZE[0])
+
+    def api_photo_handler(
+        self, source_name: str, query: dict[str, list[str]]
+    ) -> tuple[Any, mock.Mock, Path]:
+        """A handler wired to a real on-disk JPEG plus a stubbed query.
+
+        ``Path.resolve()`` is load-bearing, not cosmetic: macOS puts temp dirs
+        under /private/tmp, and ``api_photo`` resolves internally, so an
+        unresolved expected path would never match the call.
+        """
+        root = Path(self.temporary.name).resolve()
+        source = root / source_name
+        source.write_bytes(b"\xff\xd8\xff\xd9")
+        thumbnail = root / "cache" / f"{source.stem}.jpg"
+        thumbnail.parent.mkdir(parents=True, exist_ok=True)
+        thumbnail.write_bytes(b"\xff\xd8\xff\xd9")
+        project = mock.Mock(root=root, thumb_dir=thumbnail.parent)
+        row = {"relative_path": source.name, "thumbnail": str(thumbnail)}
+        handler = object.__new__(http_api.Handler)
+        handler._photo_row = mock.Mock(return_value=(project, row))
+        handler._send_file = mock.Mock()
+        handler._query = mock.Mock(return_value={"id": ["1"], **query})
+        return handler, source, thumbnail
+
+    def test_api_photo_serves_a_width_bounded_jpeg_for_any_extension(self) -> None:
+        """`&w=` works for JPEG too, not only for RAW/HEIF.
+
+        Before this change a JPEG went out as the ORIGINAL bytes (24MB) because
+        JPEG is not in DISPLAY_PREVIEW_EXTENSIONS and so skipped the preview
+        branch entirely. If `&w=` only worked for RAW the complaint would be
+        unaddressed for the most common format.
+        """
+        handler, source, thumbnail = self.api_photo_handler(
+            "IMG_9002.JPG", {"w": [str(VIEWER_PREVIEW_WIDTH)]}
+        )
+        with mock.patch.object(
+            http_api, "ensure_display_preview", return_value=thumbnail
+        ) as build:
+            handler.api_photo()
+        build.assert_called_once_with(
+            source,
+            thumbnail,
+            max_size=(VIEWER_PREVIEW_WIDTH, VIEWER_PREVIEW_WIDTH),
+        )
+        handler._send_file.assert_called_once_with(thumbnail, "image/jpeg")
+
+    def test_api_photo_without_a_width_keeps_serving_the_original(self) -> None:
+        """No `&w=` means no behaviour change -- that is the fallback path."""
+        handler, source, _ = self.api_photo_handler("IMG_9003.JPG", {})
+        handler.api_photo()
+        handler._send_file.assert_called_once_with(source)
+
+    def test_a_non_numeric_width_is_rejected_rather_than_ignored(self) -> None:
+        handler, _, _ = self.api_photo_handler("IMG_9004.JPG", {"w": ["wide"]})
+        with self.assertRaises(ValueError):
+            handler.api_photo()
+        handler._send_file.assert_not_called()
+
+    def test_preview_failures_fall_back_to_the_original_bytes(self) -> None:
+        """A preview that cannot be built must not blank the viewer."""
+        handler, source, _ = self.api_photo_handler(
+            "IMG_9005.JPG", {"w": [str(VIEWER_PREVIEW_WIDTH)]}
+        )
+        with mock.patch.object(
+            http_api, "ensure_display_preview", side_effect=OSError("offline")
+        ):
+            handler.api_photo()
+        handler._send_file.assert_called_once_with(source)
+
+    def test_preview_cache_keys_separate_widths(self) -> None:
+        """Reverse proof: two widths must not share one cached file.
+
+        If the bound were left out of the fingerprint, whichever rendition was
+        built first would be served to both -- a "preview" silently blurrier
+        than it claims, or a full-size render downloaded for a small box.
+        """
+        source = self.root / "photos" / "IMG_9006.JPG"
+        source.write_bytes(b"\xff\xd8\xff\xd9")
+        thumbnail = self.root / "cache" / "IMG_9006.jpg"
+        thumbnail.parent.mkdir(parents=True, exist_ok=True)
+        thumbnail.write_bytes(b"\xff\xd8\xff\xd9")
+        narrow = display_preview_path(source, thumbnail, (512, 512))
+        wide = display_preview_path(source, thumbnail, (2048, 2048))
+        default = display_preview_path(source, thumbnail)
+        self.assertNotEqual(narrow, wide)
+        self.assertNotEqual(wide, default)
+        self.assertEqual(default, display_preview_path(source, thumbnail))
+
+    def test_a_non_positive_bound_is_rejected(self) -> None:
+        source = self.root / "photos" / "IMG_9007.JPG"
+        source.write_bytes(b"\xff\xd8\xff\xd9")
+        thumbnail = self.root / "cache" / "IMG_9007.jpg"
+        thumbnail.parent.mkdir(parents=True, exist_ok=True)
+        thumbnail.write_bytes(b"\xff\xd8\xff\xd9")
+        with self.assertRaises(ValueError):
+            ensure_display_preview(source, thumbnail, max_size=(0, 100))
+
+
+class CaptureVariantFormatSwitchWithdrawnTests(unittest.TestCase):
+    """The RAW/JPEG switch is gone; the fold and the hint stay.
+
+    A rollback has to be complete: an orphaned route, an unreachable endpoint
+    or a dead handler would all read as "removed" in review while still being
+    reachable at runtime.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.photos = self.root / "photos"
+        self.photos.mkdir()
+        self.config = ConfigStore(self.root / "config.json")
+        self.config.data["default_cache_root"] = str(self.root / "cache")
+        self.config.save()
+        self.manager = ProjectManager(self.config)
+        self.project = self.manager.open(str(self.photos))
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def web_root(self) -> Path:
+        return Path(__file__).parents[1] / "web"
+
+    def script(self, name: str) -> str:
+        return (self.web_root() / "js" / name).read_text(encoding="utf-8")
+
+    def test_the_variant_endpoint_is_no_longer_routed(self) -> None:
+        self.assertNotIn("/api/photo/variants", http_api.GET_ROUTES)
+
+    def test_the_service_no_longer_exposes_the_group_query(self) -> None:
+        self.assertFalse(
+            hasattr(PhotoQueryService, "capture_variants"),
+            "PhotoQueryService 仍暴露 capture_variants()",
+        )
+
+    def test_the_handler_method_is_gone(self) -> None:
+        self.assertFalse(
+            hasattr(http_api.Handler, "api_photo_variants"),
+            "http_api.Handler 仍保留 api_photo_variants()",
+        )
+
+    def test_no_script_still_calls_the_withdrawn_endpoint(self) -> None:
+        for path in (self.web_root() / "js").glob("*.js"):
+            self.assertNotIn(
+                "/api/photo/variants",
+                path.read_text(encoding="utf-8"),
+                path.name,
+            )
+
+    def test_no_script_still_carries_the_variant_switch_state(self) -> None:
+        """`viewerVariants` and friends were only ever for the switch.
+
+        Leaving them in `state` would be the kind of dead field that later
+        reads as "the browser mirrors the whole group", which is no longer
+        true.
+        """
+        for name in ("runtime.js", "viewer.js", "app.js", "gallery.js"):
+            source = self.script(name)
+            for symbol in (
+                "viewerVariants",
+                "viewerVariantIndex",
+                "cycleViewerVariant",
+                "loadViewerVariants",
+                "viewerCurrentPhoto",
+                "renderViewerVariantSwitch",
+            ):
+                self.assertNotIn(symbol, source, f"{name} 仍引用 {symbol}")
+
+    def test_the_variant_button_style_is_gone(self) -> None:
+        style = (self.web_root() / "css" / "viewer.css").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn(".viewer-variant-option", style)
+
+    def test_the_badge_element_id_survives(self) -> None:
+        """Frozen: the DOM spec asserts on this id, so it must not change."""
+        markup = (self.web_root() / "index.html").read_text(encoding="utf-8")
+        self.assertIn('id="viewerVariantBadge"', markup)
+
+    def test_the_badge_stays_plain_text_with_no_button_semantics(self) -> None:
+        """The hint must not be clickable any more.
+
+        Asserted on the rendered markup because that is what the browser
+        exposes: no `role="group"`, no button element, and the text is still
+        the `ARW + JPEG` form the DOM spec matches on.
+        """
+        markup = (self.web_root() / "index.html").read_text(encoding="utf-8")
+        badge = markup.split('id="viewerVariantBadge"', 1)[1].split(">", 1)[0]
+        self.assertNotIn("button", badge.lower())
+        self.assertNotIn("role=", badge.lower())
+
+        source = self.script("viewer.js")
+        self.assertIn("renderViewerVariantBadge", source)
+        # The badge's text comes from the shared formatter, unchanged, so
+        # "CR3 + JPG" still renders exactly as the DOM spec expects.
+        self.assertIn("variantFormatText(p, true)", source)
+
+    def test_the_badge_title_states_that_raw_is_not_previewed(self) -> None:
+        """The tooltip has to be accurate, not just present.
+
+        Users asked why a RAW they can see listed never opens; the title is
+        where that question gets answered.
+        """
+        source = self.script("viewer.js")
+        self.assertIn("不提供 RAW 预览", source)
+        self.assertIn("本组包含", source)
+
+    def test_folding_still_works_without_the_switch(self) -> None:
+        """The rollback must not disturb the feature that was kept."""
         with closing(connect_db(self.project.db_path)) as conn:
             jpg = insert_photo(
-                conn, "IMG_7001.JPG", taken="2026:10:02 17:59:44", size=2_000_000
+                conn, "IMG_9101.JPG", taken="2026:10:02 17:59:44"
             )
             raw = insert_photo(
                 conn,
-                "raw/IMG_7001.ARW",
+                "raw/IMG_9101.ARW",
                 taken="2026:10:02 17:59:44",
                 size=20_000_000,
             )
+            lone = insert_photo(conn, "LONE9102.JPG")
             rebuild_capture_variants(conn)
             conn.commit()
-        return jpg, raw
 
-    # ------------------------------------------------------------------
-    # A. The data the switch needs
-    # ------------------------------------------------------------------
-
-    def test_switching_off_the_card_reaches_the_folded_raw(self) -> None:
-        """The whole point: the RAW is unreachable from the listing alone."""
-        jpg, raw = self.pair()
-        library = self.application().photo_queries.photos(
+        scanner = Scanner(self.config, self.manager)
+        context = http_api.ApplicationContext(
+            self.config,
+            self.manager,
+            scanner,
+            SimilarityGroupCache(),
+            "test-token",
+            Path("web"),
+        )
+        listing = context.photo_queries.photos(
             {
                 "project_id": [self.project.project_id],
                 "decisions": ["all"],
@@ -1767,234 +2270,20 @@ class CaptureVariantViewerTests(unittest.TestCase):
                 "formats": ["all"],
             }
         )
-        # The listing still folds to one card -- this change adds the viewer,
-        # it does not unfold the grid.
-        self.assertEqual([int(item["id"]) for item in library["items"]], [jpg])
+        ids = [int(item["id"]) for item in listing["items"]]
+        self.assertEqual(set(ids), {jpg, lone})
+        self.assertNotIn(raw, ids)
+        self.assertEqual(listing["total"], 2)
+        # The representative still advertises the whole group, which is what
+        # keeps the "ARW + JPG" badge meaningful after the switch was removed.
+        card = next(item for item in listing["items"] if int(item["id"]) == jpg)
+        self.assertEqual(card["variant_extensions"], ["ARW", "JPG"])
 
-        items = self.variants(raw)["items"]
-        self.assertEqual({int(item["id"]) for item in items}, {jpg, raw})
-        by_id = {int(item["id"]): item for item in items}
-        # Each format carries its OWN identity, not the representative's.
-        self.assertEqual(by_id[raw]["relative_path"], "raw/IMG_7001.ARW")
-        self.assertEqual(by_id[jpg]["relative_path"], "IMG_7001.JPG")
-        self.assertEqual(by_id[raw]["format_category"], "raw")
-        self.assertEqual(by_id[jpg]["format_category"], "jpeg")
-        self.assertNotEqual(
-            by_id[raw]["photo_url"],
-            by_id[jpg]["photo_url"],
-            "两个格式必须有不同的 photo_url，否则切换只是换了标签",
-        )
-        self.assertNotEqual(by_id[raw]["size"], by_id[jpg]["size"])
-        # Both sides report the same group, which is what the badge renders.
-        for item in items:
-            self.assertEqual(item["variant_extensions"], ["ARW", "JPG"])
-
-    def test_group_is_reachable_from_either_member(self) -> None:
-        jpg, raw = self.pair()
-        from_raw = {int(i["id"]) for i in self.variants(raw)["items"]}
-        from_jpg = {int(i["id"]) for i in self.variants(jpg)["items"]}
-        self.assertEqual(from_raw, from_jpg)
-        self.assertEqual(from_raw, {jpg, raw})
-
-    def test_a_photo_outside_any_group_resolves_to_itself(self) -> None:
-        """No group is not an error: the switch simply has nothing to offer."""
-        with closing(connect_db(self.project.db_path)) as conn:
-            lone = insert_photo(conn, "LONE0002.JPG")
-            rebuild_capture_variants(conn)
-            conn.commit()
-
-        items = self.variants(lone)["items"]
-        self.assertEqual([int(item["id"]) for item in items], [lone])
-        self.assertEqual(items[0]["variant_extensions"], [])
-
-    def test_unavailable_photo_is_rejected_rather_than_returned_empty(self) -> None:
-        with self.assertRaises(ValueError):
-            self.variants(999_999)
-
-    def test_group_of_three_offers_every_format(self) -> None:
-        with closing(connect_db(self.project.db_path)) as conn:
-            jpg = insert_photo(conn, "IMG_7002.JPG", taken="2026:10:02 17:59:44")
-            raw = insert_photo(
-                conn, "raw/IMG_7002.ARW", taken="2026:10:02 17:59:44",
-                size=20_000_000,
-            )
-            nef = insert_photo(
-                conn, "raw/IMG_7002.NEF", taken="2026:10:02 17:59:44",
-                size=21_000_000,
-            )
-            rebuild_capture_variants(conn)
-            conn.commit()
-
-        items = self.variants(jpg)["items"]
-        self.assertEqual({int(i["id"]) for i in items}, {jpg, raw, nef})
-        self.assertEqual(items[0]["variant_extensions"], ["ARW", "NEF", "JPG"])
-
-    # ------------------------------------------------------------------
-    # B. Degradation when the RAW has no analysis of its own
-    # ------------------------------------------------------------------
-
-    def test_unanalysed_raw_degrades_to_absent_fields_not_zeros(self) -> None:
-        """A RAW the decoder never measured must not read as "0 分 · 0 B".
-
-        `photo_payload` sets `quality_score` to None when the row carries an
-        error, and leaves width/height/size at 0 for a file that was never
-        measured. The viewer's meta line drops those segments entirely
-        (`viewerMetaText` in web/js/viewer.js); what this test pins is that
-        the backend hands it nulls and zeros rather than a fabricated number,
-        which is the precondition for that degradation.
-        """
-        with closing(connect_db(self.project.db_path)) as conn:
-            jpg = insert_photo(conn, "IMG_7003.JPG", taken="2026:10:02 17:59:44")
-            raw = insert_photo(
-                conn,
-                "raw/IMG_7003.ARW",
-                taken="2026:10:02 17:59:44",
-                size=20_000_000,
-                error="无法解码 RAW",
-                width=0,
-                height=0,
-            )
-            rebuild_capture_variants(conn)
-            conn.commit()
-
-        by_id = {int(i["id"]): i for i in self.variants(jpg)["items"]}
-        degraded = by_id[raw]
-        self.assertIsNone(degraded["quality_score"])
-        self.assertEqual(degraded["width"], 0)
-        self.assertEqual(degraded["height"], 0)
-        self.assertEqual(degraded["reason"], "")
-        # The JPEG beside it is fully measured, so the difference is real
-        # rather than an artefact of the fixture.
-        self.assertIsNotNone(by_id[jpg]["quality_score"])
-        self.assertGreater(by_id[jpg]["width"], 0)
-
-    def test_switching_formats_refreshes_the_decision_state_per_format(self) -> None:
-        """The keep/remove highlight must follow the format on screen.
-
-        Deciding on one format syncs to the whole group, so the RAW is decided
-        too -- but with sync disabled the two diverge, and the viewer has to
-        show the selected format's own state rather than the card's.
-        """
-        with closing(connect_db(self.project.db_path)) as conn:
-            jpg = insert_photo(conn, "IMG_7004.JPG", taken="2026:10:02 17:59:44")
-            raw = insert_photo(
-                conn, "raw/IMG_7004.ARW", taken="2026:10:02 17:59:44",
-                size=20_000_000,
-            )
-            rebuild_capture_variants(conn)
-            conn.commit()
-
-        set_photo_decision(self.project, jpg, "keep", False)
-        items = {int(i["id"]): i for i in self.variants(jpg)["items"]}
-        self.assertEqual(items[jpg]["decision"], "keep")
-        # Sync off: the RAW is untouched, which is exactly the divergence the
-        # per-format highlight has to reflect.
-        self.assertEqual(items[raw]["decision"], "")
-
-    def test_a_decision_on_the_folded_raw_reaches_the_card(self) -> None:
-        """Deciding from the RAW side must sync back onto the library card."""
-        jpg, raw = self.pair()
-        result = set_photo_decision(self.project, raw, "remove", True)
-        self.assertEqual({int(row["id"]) for row in result.rows}, {jpg, raw})
-        by_id = {int(i["id"]): i for i in self.variants(jpg)["items"]}
-        self.assertEqual(by_id[jpg]["decision"], "remove")
-        self.assertEqual(by_id[raw]["decision"], "remove")
-
-    # ------------------------------------------------------------------
-    # C. The folding contract itself must be untouched
-    # ------------------------------------------------------------------
-
-    def test_the_group_endpoint_does_not_unfold_the_library(self) -> None:
-        """Fetching the group must not leak extra cards into the grid."""
-        jpg, raw = self.pair()
-        with closing(connect_db(self.project.db_path)) as conn:
-            bystander = insert_photo(conn, "IMG_7005.JPG")
-            conn.commit()
-
-        before = self.application().photo_queries.photos(
-            {
-                "project_id": [self.project.project_id],
-                "decisions": ["all"],
-                "ai_states": ["all"],
-                "formats": ["all"],
-            }
-        )
-        self.variants(jpg)
-        after = self.application().photo_queries.photos(
-            {
-                "project_id": [self.project.project_id],
-                "decisions": ["all"],
-                "ai_states": ["all"],
-                "formats": ["all"],
-            }
-        )
-        self.assertEqual(
-            [int(i["id"]) for i in before["items"]],
-            [int(i["id"]) for i in after["items"]],
-        )
-        self.assertEqual(after["total"], before["total"])
-        self.assertEqual(
-            {int(i["id"]) for i in after["items"]}, {jpg, bystander}
-        )
-        self.assertNotIn(raw, {int(i["id"]) for i in after["items"]})
-
-    def test_route_is_registered_for_the_viewer(self) -> None:
-        """The viewer addresses this by URL; an unregistered route is a 404."""
-        self.assertEqual(
-            http_api.GET_ROUTES.get("/api/photo/variants"), "api_photo_variants"
-        )
-        self.assertTrue(
-            hasattr(http_api.Handler, "api_photo_variants"),
-            "http_api.Handler 缺少 api_photo_variants",
-        )
-
-    def test_handler_returns_the_group_it_delegates_to(self) -> None:
-        """The HTTP layer must pass the parsed query through untouched."""
-        jpg, raw = self.pair()
-        handler = object.__new__(http_api.Handler)
-        handler._send_json = mock.Mock()
-        handler._query = mock.Mock(
-            return_value={
-                "project_id": [self.project.project_id],
-                "id": [str(raw)],
-            }
-        )
-        with mock.patch.object(http_api, "APPLICATION", self.application()):
-            handler.api_photo_variants()
-        payload = handler._send_json.call_args.args[0]
-        self.assertEqual({int(i["id"]) for i in payload["items"]}, {jpg, raw})
-
-    # ------------------------------------------------------------------
-    # Reverse proof: the switch must be capable of actually switching
-    # ------------------------------------------------------------------
-
-    def test_the_two_formats_really_do_differ_on_screen(self) -> None:
-        """Guards against a constant.
-
-        If the payloads were interchangeable the tests above would still pass
-        while the feature did nothing. Here the RAW's URL, name and size are
-        read back through the very call the viewer makes, and each must differ
-        from the JPEG's.
-        """
-        jpg, raw = self.pair()
-        items = self.variants(jpg)["items"]
-        jpeg_payload = next(i for i in items if int(i["id"]) == jpg)
-        raw_payload = next(i for i in items if int(i["id"]) == raw)
-
-        self.assertEqual(
-            [i["photo_url"] for i in items],
-            list(dict.fromkeys(i["photo_url"] for i in items)),
-            "同一组内 photo_url 必须互不相同",
-        )
-        self.assertRegex(jpeg_payload["photo_url"], rf"[?&]id={jpg}(&|$)")
-        self.assertRegex(raw_payload["photo_url"], rf"[?&]id={raw}(&|$)")
-        self.assertNotEqual(
-            jpeg_payload["relative_path"].rsplit("/", 1)[-1],
-            raw_payload["relative_path"].rsplit("/", 1)[-1],
-        )
-        self.assertNotEqual(jpeg_payload["size"], raw_payload["size"])
-        # And the raw is displayable: /api/photo serves a JPEG rendition of it.
-        self.assertTrue(raw_payload["photo_url"].startswith("/api/photo?"))
+    def test_the_f_key_serves_the_original_instead_of_the_format(self) -> None:
+        """F was the switch's key; it is reused, not left dangling."""
+        app = self.script("app.js")
+        self.assertIn('key === "f"', app)
+        self.assertIn("loadViewerOriginal()", app)
 
 
 class CaptureVariantMigrationTests(unittest.TestCase):

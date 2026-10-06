@@ -104,13 +104,56 @@ def photo_filter_where(
     return " AND ".join(clauses), params
 
 def photo_library_counts(conn: sqlite3.Connection) -> dict[str, int]:
-    """Counts for every sidebar preset, using the same readable-photo definition."""
+    """Counts for every sidebar preset, using the same readable-photo definition.
+
+    Cards, not files: see :func:`project_photo_counts` for why the two bases
+    differ and which one the sidebar must use.
+    """
     return project_photo_counts(conn)["library_counts"]
 
 
 def project_photo_counts(conn: sqlite3.Connection) -> dict[str, Any]:
-    """Build every project/sidebar photo count with a single aggregate scan."""
-    readable = "status='active' AND COALESCE(error,'')='' AND suggestion<>'unreadable'"
+    """Build every project/sidebar photo count with a single aggregate scan.
+
+    Two counting bases live side by side, and mixing them up is the bug this
+    shape exists to prevent:
+
+    * **The library's own tallies** -- ``total`` and everything in
+      ``library_counts`` -- count **capture groups**, not files. A RAW+JPEG
+      pair is one card on screen, so it must be one card in the sidebar too;
+      counting both files reported 1468 photos for 734 cards. A photo outside
+      any group is its own group, so it is counted once as before.
+    * **Format tallies** (``format_category_counts``) stay **per file**, because
+      "how many RAW do I have" is a question about the disk, not about cards.
+
+    A group is represented by its representative file -- the same one the
+    library folds the others into (see ``_representative_sort_key``: readable,
+    non-RAW, highest resolution wins). Counting that row's own attributes is
+    what keeps the sidebar consistent with the screen: the user sees one card,
+    that card wears one decision badge, and the number beside it counts that
+    card.
+
+    When ``sync_variant_decisions`` is on (the default) every member of a group
+    already shares one decision, so representative-vs-member cannot disagree.
+    With syncing off they *can* diverge, and then this deliberately reports the
+    representative's decision -- the one the user actually acted on and the one
+    the card displays. The alternative (counting a group as decided if *any*
+    member is) would let a group land in ``keep`` and in ``undecided`` at once
+    and break the sum identity asserted below.
+
+    The aggregate stays a single scan: the representative set is a cheap
+    ``NOT EXISTS`` against the primary-keyed ``capture_variant_members``, which
+    is an index seek per row rather than a join.
+    """
+    # Only rows that represent a group (or belong to none) are counted.
+    counted = (
+        "photos WHERE NOT EXISTS("
+        "SELECT 1 FROM capture_variant_members cv"
+        " WHERE cv.photo_id=photos.id AND cv.representative_id<>photos.id)"
+    )
+    readable = (
+        "status='active' AND COALESCE(error,'')='' AND suggestion<>'unreadable'"
+    )
     unreadable = "status='active' AND (COALESCE(error,'')<>'' OR suggestion='unreadable')"
     row = conn.execute(
         f"""SELECT
@@ -130,7 +173,7 @@ def project_photo_counts(conn: sqlite3.Connection) -> dict[str, Any]:
               SUM(CASE WHEN {readable} AND decision=''
                         AND suggestion='remove' THEN 1 ELSE 0 END) ai_remove_pending,
               SUM(CASE WHEN {unreadable} THEN 1 ELSE 0 END) unreadable
-           FROM photos"""
+           FROM {counted}"""
     ).fetchone()
     library_counts = {
         key: int(row[key] or 0)

@@ -538,9 +538,8 @@ function moveViewerPastAffected(affectedIds) {
       return;
     }
   }
-  // 全部照片都受影响时无处可去，就地把决定状态刷新在当前显示的那一份上——
-// 它可能是折叠掉的格式，state.items 里没有。
-  const current = viewerCurrentPhoto();
+// 全部照片都受影响时无处可去，就地把决定状态刷新在当前显示的那一张上。
+  const current = state.items[state.viewerIndex];
   if (current) updateViewerDecision(current);
 }
 async function setDecision(id, decision, fromViewer = true) {
@@ -575,17 +574,11 @@ async function setDecision(id, decision, fromViewer = true) {
     const similarMember = state.similar.detail?.members.find(
       (item) => item.id === photo.id,
     );
-    // 查看器里已取回的变体格式是独立副本，决定后必须一起刷新，否则切回该格式
-    // 会显示旧的评分与建议。被折叠的格式不在 state.items 里，只能靠这里同步。
-    const viewerVariant = state.viewerVariants.find(
-      (item) => item.id === photo.id,
-    );
+    // 被折叠的格式不在 state.items 里，只能靠这里同步。
     if (loaded) {
       loadedIds.add(photo.id);
       Object.assign(loaded, photo);
     } else adjustUnloadedLibraryTotal(photo);
-    if (viewerVariant && viewerVariant !== loaded)
-      Object.assign(viewerVariant, photo);
     if (similarMember && similarMember !== loaded)
       Object.assign(similarMember, photo);
     updateCardDecision(photo.id, photo.decision);
@@ -621,9 +614,9 @@ async function setDecision(id, decision, fromViewer = true) {
     await advanceSimilarGroup(fromViewer && $("#viewer").open);
     return true;
   }
-  // 查看器正在显示的那一份：可能是折叠掉的格式，它不在 state.items 里。
+  // 查看器正在显示的那一张。
   const p = fromViewer
-    ? viewerCurrentPhoto()
+    ? state.items[state.viewerIndex]
     : state.items.find((item) => item.id === id);
   if (fromViewer && state.settings.auto_advance)
     moveViewerPastAffected(affectedIds);

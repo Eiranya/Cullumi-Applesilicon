@@ -41,6 +41,87 @@ function updateViewerDecision(p) {
 function viewerTransformTarget() {
   return state.viewerMotion.active ? $("#viewerVideo") : $("#viewerImage");
 }
+// 「1:1」在此处的确切含义：让一个**源像素**正好占一个 **CSS 像素**，浏览器因此
+// 不做任何插值。CSS `transform: scale()` 是在已解码位图之上重采样的，所以只有把
+// 位图铺到与源像素一一对应时才谈得上原始像素。
+//
+// 位图本身的像素尺寸由 naturalWidth 决定，而 CSS 的 max-width/max-height 会先把它
+// 缩小到视口内。于是 naturalWidth(=源像素) 与 offsetWidth(=缩放前的布局像素) 的
+// 比值就是「1:1 所需的放大倍数」：
+//
+//   offsetWidth * scale == naturalWidth   =>   scale = naturalWidth / offsetWidth
+//
+// 这也解释了为什么 1:1 通常**大于** 1：一张 4000px 的照片在 800px 的舞台上，1:1
+// 需要放大到 5 倍——那个倍率下每个屏幕像素正好对应一个源像素，浏览器无需插值。
+//
+// 若位图比视口小（offsetWidth >= naturalWidth），1:1 就是 scale=1。DPR>1 的屏幕上
+// CSS 像素本身就小于设备像素，这是显示器的物理约束，与「是否插值」无关，故不参与
+// 该比值。
+function viewerOneToOneScale() {
+  const target = viewerTransformTarget();
+  const natural = target.naturalWidth || 0,
+    laid = target.offsetWidth || 0;
+  if (!natural || !laid) return 1;
+  return Math.max(1, natural / laid);
+}
+// 当前是否**正好**处在 1:1。
+//
+// 这里必须用「等于」而不是「小于等于」。小于 1:1 点意味着位图被缩着放（每个 CSS
+// 像素塞了多于一个源像素），那是降采样而非 1:1；把它一并报成「已 1:1」会让状态
+// 提示说谎——一张4000px 的图缩到 800px 宽、放到 3 倍，听起来像 1:1，其实每个屏幕
+// 像素里挤了 1.67 个源像素。只有恰好落在该点（±0.1% 容忍浮点误差）才叫 1:1。
+//
+// 「有没有插值」是另一个问题，由 viewerIsInterpolating 回答；两者必须分开。
+function viewerIsOneToOne() {
+  const oneToOne = viewerOneToOneScale(),
+    scale = state.viewerTransform.scale;
+  if (!viewerHasPixels()) return false;
+  return Math.abs(scale - oneToOne) <= oneToOne * 0.001;
+}
+// 位图是否已经解码出尺寸。没有它时不能对「是否 1:1」下结论——那会让提示在图片
+// 尚未加载时先闪一次错误的「已插值 100%」。
+function viewerHasPixels() {
+  const target = viewerTransformTarget();
+  return Boolean(target.naturalWidth && target.offsetWidth);
+}
+// 是否正在放大超过 1:1，也就是浏览器在插值。
+function viewerIsInterpolating() {
+  if (!viewerHasPixels()) return false;
+  return state.viewerTransform.scale > viewerOneToOneScale() * 1.001;
+}
+// 状态提示。必须如实告诉用户「看到的不是原始像素」，因为这是用户投诉的原点：
+// 放大后发糊不是原图不清晰，而是浏览器在插值一张已经缩小的位图。
+function renderViewerScaleHint() {
+  const hint = $("#viewerScaleHint"),
+    p = state.viewerMotion.active ? null : state.items[state.viewerIndex];
+  if (!p || state.viewerMotion.active || !viewerHasPixels()) {
+    hint.textContent = "";
+    hint.classList.remove("viewer-scale-hint-exact");
+    return;
+  }
+  const width = Number(p.width) || 0,
+    height = Number(p.height) || 0;
+  if (!width || !height) {
+    hint.textContent = "";
+    hint.classList.remove("viewer-scale-hint-exact");
+    return;
+  }
+  if (viewerIsOneToOne()) {
+    hint.textContent = `已 1:1（原始分辨率 ${width} × ${height}）`;
+    hint.classList.add("viewer-scale-hint-exact");
+    return;
+  }
+  hint.classList.remove("viewer-scale-hint-exact");
+  if (viewerIsInterpolating()) {
+    hint.textContent = `已插值 ${Math.round(
+      state.viewerTransform.scale * 100,
+    )}%，细节非原始像素`;
+    return;
+  }
+  // 未达 1:1：整幅图缩在屏幕里，每个屏幕像素含多于一个源像素。没有插值，但也没有
+  // 放大到能逐像素判读的程度——说清楚比只报一个倍率有用。
+  hint.textContent = `整幅显示 · 原始分辨率 ${width} × ${height}`;
+}
 function applyViewerTransform() {
   const t = state.viewerTransform,
     target = viewerTransformTarget();
@@ -53,6 +134,7 @@ function applyViewerTransform() {
   target.style.transform = `translate3d(${t.x}px,${t.y}px,0) scale(${t.scale})`;
   target.classList.toggle("zoomed", t.scale > 1);
   target.classList.toggle("dragging", t.dragging);
+  renderViewerScaleHint();
 }
 function clampViewerPan() {
   const t = state.viewerTransform,
@@ -74,12 +156,15 @@ function resetViewerTransform() {
   clearTimeout(state.viewerClickTimer);
   applyViewerTransform();
 }
+// 缩放上限必须够到「原始像素」这一档，否则 1:1 按钮在常规照片上会撞上限而停在
+// 一个仍然插值的倍率上——那正是这个功能要解决的问题，不能自己复现。
+const VIEWER_MAX_SCALE = 32;
 function zoomViewer(factor, clientX, clientY) {
   const t = state.viewerTransform,
     figure = viewerTransformTarget().parentElement,
     rect = figure.getBoundingClientRect(),
     old = t.scale,
-    next = Math.max(1, Math.min(8, old * factor));
+    next = Math.max(1, Math.min(VIEWER_MAX_SCALE, old * factor));
   if (next === old) return;
   const pointX =
       (clientX ?? rect.left + rect.width / 2) - (rect.left + rect.width / 2),
@@ -93,6 +178,25 @@ function zoomViewer(factor, clientX, clientY) {
     t.x = 0;
     t.y = 0;
   }
+  clampViewerPan();
+  applyViewerTransform();
+}
+// 一键跳到真实 1:1。位图比视口小的时候 scale 就是 1（本来就没有插值）；
+// 比视口大时按 naturalWidth/offsetWidth 放大到位图与源像素一一对应。
+function toggleViewerOneToOne() {
+  const t = state.viewerTransform;
+  if (viewerIsOneToOne()) {
+    resetViewerTransform();
+    return;
+  }
+  Object.assign(t, {
+    scale: viewerOneToOneScale(),
+    x: 0,
+    y: 0,
+    dragging: false,
+    moved: false,
+    suppressClick: false,
+  });
   clampViewerPan();
   applyViewerTransform();
 }
@@ -326,23 +430,26 @@ async function saveMotionCover(source = "motion", timeMs = null) {
     button.disabled = false;
   }
 }
-// 变体按钮上的格式标签。优先取文件名的扩展名（payload 里的 extension 是
-// 小写带点的原值）；路径中没有扩展名时退回 extension 字段。注意判断必须是
-// dot > slash 而不是 dot > max(dot, slash) —— 后者恒为假，标签会永远是空的。
-function viewerVariantLabel(photo) {
-  const path = String(photo.relative_path || ""),
-    dot = path.lastIndexOf("."),
-    slash = path.lastIndexOf("/");
-  return (dot > slash ? path.slice(dot + 1) : photo.extension || "")
-    .replace(/^\./, "")
-    .toUpperCase();
+// 变体徽章：纯文字、不可点击。
+//
+// 照片库把同一张曝光的 RAW + JPEG 折叠成一张卡片，state.items 里只有代表文件
+// （`_representative_sort_key` 永远挑可解码、分辨率更高的那一份）。RAW 可能还没
+// 跑出分析结果（quality_score 为 null、reason 为空），此时不能显示 "undefined 分"
+// 或 "0 B"，而是整段略去。p._blinkLabel 只在相似视图里赋值，照片库中没有 blinks
+// 段，因此这里的 undefined 是预期行为。
+//
+// 用户试用后撤回了「点开预览可在 RAW/JPEG 间切换」：RAW 无法在浏览器里解码，
+// 切过去只会得到更差或空白的画面。因此徽章退化为纯提示，标题如实说明本组含 RAW
+// 而只预览可解码格式；可点击按钮、.viewer-variant-option 样式与 F 键循环均已移除。
+function renderViewerVariantBadge(p) {
+  const host = $("#viewerVariantBadge"),
+    text = variantFormatText(p, true);
+  host.classList.toggle("hidden", !text);
+  host.textContent = text;
+  host.title = text
+    ? `本组包含 ${variantFormatText(p)}；Cullumi 只预览可解码的格式，不提供 RAW 预览`
+    : "";
 }
-// 同一张曝光的 RAW + JPEG 在照片库中折叠成一张卡片，所以 state.items 里只有
-// 代表文件，被折叠的那一份连 id 都没有。查看器要切换格式就必须另外取回整组数据
-// （每种格式各自的完整 payload），否则切过去就没有文件名、尺寸和评分可显示。
-// RAW 可能还没跑出分析结果（quality_score 为 null、reason 为空），此时不能显示
-// "undefined 分" 或 "0 B"，而是整段略去。p._blinkLabel 只在相似视图里赋值，
-// 照片库中没有 blinks 段，因此这里的 undefined 是预期行为。
 function viewerMetaText(p) {
   const parts = [],
     width = Number(p.width) || 0,
@@ -355,39 +462,7 @@ function viewerMetaText(p) {
   if (p.motion?.error) parts.push("动态部分不可用");
   return parts.join(" · ");
 }
-// 变体切换控件。徽章原本是一段「CR3 + JPG」的纯文本，现在每个格式各成一个
-// 按钮，中间仍以「 + 」相连：外观与文案一字不变，而每个格式都可点击切换。
-// 整组只有一份照片时退化成纯文本徽章（即从前的行为），不做无用的往返。
-function renderViewerVariantSwitch(p) {
-  const host = $("#viewerVariantBadge"),
-    items = state.viewerVariants;
-  const text = variantFormatText(p, true);
-  host.classList.toggle("hidden", !text && items.length < 2);
-  if (items.length < 2) {
-    host.textContent = text;
-    host.title = text ? `关联格式：${variantFormatText(p)}` : "";
-    host.removeAttribute("role");
-    return;
-  }
-  host.setAttribute("role", "group");
-  host.setAttribute("aria-label", "切换显示格式");
-  host.title = `点击切换显示格式（当前共 ${items.length} 种），或按 F 键`;
-  const nodes = [];
-  items.forEach((item, index) => {
-    if (index) nodes.push(` + `);
-    const active = state.viewerVariantIndex === index || item.id === p.id;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `viewer-variant-option${active ? " active" : ""}`;
-    button.textContent = viewerVariantLabel(item);
-    button.dataset.variantIndex = String(index);
-    button.setAttribute("aria-pressed", String(active));
-    nodes.push(button);
-  });
-  host.replaceChildren(...nodes);
-}
-// 渲染「当前这一份」照片的全部查看器状态。切换格式时必须走这里：用的是被选中
-// 格式自己的完整 payload，文件名/尺寸/评分/决定状态都会跟着换，而不只是换图。
+// 渲染当前照片的全部查看器状态。
 function renderViewerPhoto(p) {
   const suggestion = viewerSuggestion(p),
     badge = $("#viewerBadge"),
@@ -396,7 +471,12 @@ function renderViewerPhoto(p) {
   stopViewerMotion();
   resetViewerTransform();
   img.classList.remove("hidden");
-  img.src = p.photo_url;
+  // 首屏先要预览图（服务端按 w= 缓存的 JPEG），原图留给「查看原图」按需拉取。
+  // 动态照片的封面本来就是一个提取出来的 JPEG，用原图 URL 即可。
+  img.src =
+    p.media_type === "motion_photo" || !p.preview_url
+      ? p.photo_url
+      : p.preview_url;
   $("#viewerName").textContent = p.relative_path.split("/").pop();
   $("#viewerMeta").textContent = viewerMetaText(p);
   if (p.media_type === "motion_photo") {
@@ -410,91 +490,137 @@ function renderViewerPhoto(p) {
     analysisBadge.className = "viewer-badge hidden";
   }
   badge.className = `viewer-badge ${p.media_type === "motion_photo" ? "viewer-live-mark" : suggestion.kind ? `badge-${suggestion.kind}` : "hidden"}`;
-  renderViewerVariantSwitch(p);
+  renderViewerVariantBadge(p);
   updateViewerDecision(p);
+  syncViewerOriginalState();
   if (p.motion && !p.motion.error) setupMotionViewer(p);
 }
 function openViewer(i) {
   if (!state.items.length) return;
   state.viewerIndex = (i + state.items.length) % state.items.length;
-  // 换一张照片就回到该组的代表文件：格式选择是「这张照片」的临时状态。
-  state.viewerVariants = [];
-  state.viewerVariantIndex = -1;
   const p = state.items[state.viewerIndex];
   renderViewerPhoto(p);
   $("#viewerIndex").textContent =
     `${state.viewerIndex + 1} / ${state.items.length}`;
   if (!$("#viewer").open) $("#viewer").showModal();
-  loadViewerVariants(p);
+  // 位图解码完成后才知道 naturalWidth / offsetWidth，1:1 按钮的可用状态要等这一刻。
+  const img = $("#viewerImage");
+  if (img.complete && img.naturalWidth) syncViewerOriginalState();
+  else img.addEventListener("load", syncViewerOriginalState, { once: true });
 }
-// 按需取回整组格式。只有 variant_extensions 超过一种时才发请求，独立照片
-// （绝大多数）不会为这个功能多付一次往返。失败时保持纯文本徽章，不打扰用户。
-async function loadViewerVariants(p) {
-  if ((p.variant_extensions || []).length < 2) return;
-  const photoId = p.id;
-  try {
-    const result = await json(
-      `/api/photo/variants?project_id=${state.project.id}&id=${photoId}`,
-    );
-    // 用户可能已经翻到下一张：过期响应直接丢弃，否则会把上一张的格式列表
-    // 装到当前照片上。
-    if (state.items[state.viewerIndex]?.id !== photoId) return;
-    state.viewerVariants = result.items || [];
-    // 落在被预览的那一份上，而不是默认第一项：代表文件未必是组内第一行。
-    const current = state.viewerVariants.findIndex(
-      (item) => item.id === photoId,
-    );
-    state.viewerVariantIndex = current >= 0 ? current : 0;
-    renderViewerPhoto(viewerCurrentPhoto());
-  } catch {
-    // 失败时保持纯文本徽章。切换格式是增强功能，取不到整组数据不该打断预览。
-    if (state.items[state.viewerIndex]?.id !== photoId) return;
-    state.viewerVariants = [];
-    state.viewerVariantIndex = -1;
-    renderViewerVariantSwitch(state.items[state.viewerIndex]);
+// 「已载入原图」= <img> 当前挂的就是 photo_url（而非 preview_url）。
+//
+// 判定刻意不看尺寸：尺寸法在「原图恰好被缩到预览图大小」时会误判为已载入，
+// 于是 1:1 按钮声称看的是原始像素，实际却在放大一张预览图——正是要修的毛病。
+function viewerShowingOriginal() {
+  const p = state.items[state.viewerIndex],
+    img = $("#viewerImage");
+  if (!p) return false;
+  const current = (img.getAttribute("src") || "").split("&w=")[0];
+  return Boolean(p.photo_url) && current === p.photo_url;
+}
+// 原图按需加载的状态机。
+//
+// 为什么默认不载：原图实测中位 19.5MB、最大 24MB，逐张下发给「看一眼构图」毫无
+// 必要（preview_url 的 JPEG 约 1MB）。但 1:1 判细节必须要有真像素，否则「放大后
+// 发糊」会被误当成照片本身不清晰。
+//
+// 失败处理：原图取不到时**不**清空画面——保留已经显示的预览图，只把按钮标成不可用
+// 并说明原因。降级必须是无声的视觉损失，而不是一个坏掉的预览器。
+function syncViewerOriginalState() {
+  const p = state.items[state.viewerIndex],
+    button = $("#viewerOriginal"),
+    hint = $("#viewerOriginalHint");
+  if (!p || state.viewerMotion.active) {
+    button.disabled = true;
+    hint.textContent = "";
+    return;
   }
+  button.disabled = false;
+  if (viewerShowingOriginal()) {
+    button.classList.add("viewer-original-loaded");
+    button.textContent = "原图";
+    hint.textContent = state.viewerOriginalFailed.has(p.id)
+      ? "原图不可用，显示的是预览图"
+      : "";
+  } else {
+    button.classList.remove("viewer-original-loaded");
+    button.textContent = "查看原图";
+    hint.textContent = state.viewerOriginalFailed.has(p.id)
+      ? "原图载入失败，已退回预览图"
+      : "";
+  }
+  renderViewerScaleHint();
 }
-function viewerCurrentPhoto() {
-  return (
-    state.viewerVariants[state.viewerVariantIndex] ||
-    state.items[state.viewerIndex]
-  );
-}
-// 在同一张曝光的各格式之间循环。组内只有一份时不做任何事，调用方据此决定
-// 是否吞掉这次按键。
-function cycleViewerVariant(step = 1) {
-  const total = state.viewerVariants.length;
-  if (total < 2) return false;
-  const base = state.viewerVariantIndex < 0 ? 0 : state.viewerVariantIndex;
-  const next = (base + step + total) % total;
-  if (next === state.viewerVariantIndex) return false;
-  state.viewerVariantIndex = next;
-  renderViewerPhoto(state.viewerVariants[next]);
-  return true;
+// 取原图。用一个独立的 Image 预加载，成功后才替换 <img> 的 src：直接改 src 会先
+// 把当前画面清空，加载失败就只剩一个破图。预览图撑到原图到达为止，视觉上没有空洞。
+function loadViewerOriginal() {
+  const p = state.items[state.viewerIndex];
+  if (!p || state.viewerMotion.active || viewerShowingOriginal()) return;
+  const photoId = p.id,
+    indicator = $("#viewerLoading"),
+    probe = new Image();
+  indicator.classList.remove("hidden");
+  probe.onload = () => {
+    // 用户可能已经翻到下一张：过期响应直接丢弃，否则会把上一张的原图装到当前照片上。
+    if (state.items[state.viewerIndex]?.id !== photoId) {
+      indicator.classList.add("hidden");
+      return;
+    }
+    const img = $("#viewerImage");
+    img.src = p.photo_url;
+    indicator.classList.add("hidden");
+    syncViewerOriginalState();
+    img.addEventListener(
+      "load",
+      () => {
+        resetViewerTransform();
+        // 原图更大，之前那个「适应窗口」的倍率现在对应真实的 1:1，直接跳过去，
+        // 省掉用户再点一次 1:1。
+        toggleViewerOneToOne();
+        syncViewerOriginalState();
+      },
+      { once: true },
+    );
+    img.addEventListener(
+      "error",
+      () => {
+        state.viewerOriginalFailed.add(photoId);
+        // 退回已经显示着的预览图，而不是留下一张坏图。
+        img.src = p.preview_url || p.photo_url;
+        resetViewerTransform();
+        indicator.classList.add("hidden");
+        toast("原图载入失败，已退回预览图");
+        syncViewerOriginalState();
+      },
+      { once: true },
+    );
+  };
+  probe.onerror = () => {
+    indicator.classList.add("hidden");
+    if (state.items[state.viewerIndex]?.id !== photoId) return;
+    state.viewerOriginalFailed.add(photoId);
+    syncViewerOriginalState();
+    toast("原图载入失败，已保留预览图");
+  };
+  probe.src = p.photo_url;
 }
 const moveViewer = (d) => openViewer(state.viewerIndex + d);
 
 function bindViewerEvents() {
   $("#viewerPrev").onclick = () => moveViewer(-1);
   $("#viewerNext").onclick = () => moveViewer(1);
-  // 切换格式的点击入口。用事件委托，因为按钮是随整组数据一起重建的。
-  $("#viewerVariantBadge").addEventListener("click", (event) => {
-    const option = event.target.closest("[data-variant-index]");
-    if (!option) return;
-    event.preventDefault();
-    const index = Number(option.dataset.variantIndex);
-    if (index === state.viewerVariantIndex) return;
-    state.viewerVariantIndex = index;
-    renderViewerPhoto(state.viewerVariants[index]);
-  });
   $("#viewerKeep").onclick = () => {
-    const p = viewerCurrentPhoto();
+    const p = state.items[state.viewerIndex];
     if (p) setDecision(p.id, "keep");
   };
   $("#viewerRemove").onclick = () => {
-    const p = viewerCurrentPhoto();
+    const p = state.items[state.viewerIndex];
     if (p) setDecision(p.id, "remove");
   };
+  $("#viewerOneToOne").onclick = toggleViewerOneToOne;
+  $("#viewerFit").onclick = resetViewerTransform;
+  $("#viewerOriginal").onclick = loadViewerOriginal;
   $("#viewer").addEventListener("close", () => {
     stopViewerMotion();
     syncViewerDecisions().catch((error) => toast(error.message));

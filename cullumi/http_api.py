@@ -90,7 +90,6 @@ GET_ROUTES = {
     "/api/project": "api_project",
     "/api/progress": "api_progress",
     "/api/photos": "api_photos",
-    "/api/photo/variants": "api_photo_variants",
     "/api/similar-groups": "api_similar_groups",
     "/api/similar-group": "api_similar_group",
     "/api/thumb": "api_thumb",
@@ -655,10 +654,6 @@ class Handler(BaseHTTPRequestHandler):
         assert self.application.photo_queries is not None
         self._send_json(self.application.photo_queries.photos(self._query()))
 
-    def api_photo_variants(self) -> None:
-        assert self.application.photo_queries is not None
-        self._send_json(self.application.photo_queries.capture_variants(self._query()))
-
     def api_similar_groups(self) -> None:
         assert self.application.photo_queries is not None
         self._send_json(self.application.photo_queries.similar_groups(self._query()))
@@ -720,6 +715,29 @@ class Handler(BaseHTTPRequestHandler):
             self._send_file(preview, "image/jpeg")
             return
         path = safe_relative_path(project.root, row["relative_path"], "照片路径")
+        # 可选的供给尺寸：浏览器按查看器首屏的实际需求追加 &w=，服务端据此发一张
+        # 恰好够宽的 JPEG 预览图。不带 w 的链接（旧链接 / 项目封面 / 动态照片封面）
+        # 沿用历史行为。
+        raw = self._query().get("w", [""])[0]
+        if raw:
+            try:
+                width = int(raw)
+            except ValueError as error:
+                raise ValueError("w 必须是整数") from error
+            thumbnail = project_thumbnail_path(project, row["thumbnail"])
+            try:
+                preview = ensure_display_preview(
+                    path, thumbnail, max_size=(width, width)
+                )
+            except ValueError:
+                # 越界宽度是调用方的错，原样上抛为 400。
+                raise
+            except (OSError, RuntimeError):
+                # 缩略图/源不可读：退化为旧行为，胜过给用户一个坏图。
+                self._send_file(path)
+                return
+            self._send_file(preview, "image/jpeg")
+            return
         if path.suffix.lower() not in DISPLAY_PREVIEW_EXTENSIONS:
             self._send_file(path)
             return

@@ -21,20 +21,37 @@ function handleGlobalKeydown(event) {
   }
   if (event.target.matches("input[type=range]")) return;
   const key = event.key.toLowerCase();
-  // F 切换同一张曝光的显示格式。不占用 W/S/A/D 与方向键：那些键在查看器里
-  // 已有含义（保留/移除/上一张/下一张），格式切换是另一个维度。组内只有一份
-  // 时 cycleViewerVariant 返回 false，此时不吞按键，交给浏览器默认行为。
+  const photo = () => state.items[state.viewerIndex];
+  // 缩放快捷键。不占用 W/S/A/D 与方向键：那些键在查看器里已有含义
+  // （保留/移除/上一张/下一张），缩放是另一个维度。
+  //
+  // F 此前是「切换显示格式」的循环键，该功能已撤回，这里改为「载入原图」——
+  // 同一个物理键现在服务于「看清细节」这个仍然存在的需求。
+  //
+  // 1 / 0 沿用看图软件的惯例（1 = 原始像素，0 = 适应窗口），且与既有绑定零冲突：
+  // 查看器此前没有占用任何数字键。
   if (key === "f") {
-    if (cycleViewerVariant(1)) event.preventDefault();
+    loadViewerOriginal();
+    event.preventDefault();
+    return;
+  }
+  if (key === "1") {
+    toggleViewerOneToOne();
+    event.preventDefault();
+    return;
+  }
+  if (key === "0") {
+    resetViewerTransform();
+    event.preventDefault();
     return;
   }
   if (["arrowleft", "a"].includes(key)) moveViewer(-1);
   else if (["arrowright", "d"].includes(key)) moveViewer(1);
   else if (["arrowup", "w"].includes(key)) {
-    const p = viewerCurrentPhoto();
+    const p = photo();
     if (p) setDecision(p.id, "keep");
   } else if (["arrowdown", "s"].includes(key)) {
-    const p = viewerCurrentPhoto();
+    const p = photo();
     if (p) setDecision(p.id, "remove");
   } else return;
   event.preventDefault();

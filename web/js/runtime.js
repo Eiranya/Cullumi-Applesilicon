@@ -24,11 +24,6 @@ const state = {
   recentMenuId: "",
   recentGeneration: 0,
   viewerIndex: 0,
-  // Formats of the capture-variant group behind the previewed photo, fetched
-  // on demand. `index` is the entry on screen; -1 means the library's own
-  // representative, which is what a photo outside any group resolves to.
-  viewerVariants: [],
-  viewerVariantIndex: -1,
   viewerNeedsRefresh: false,
   viewerDirtyIds: new Set(),
   editor: null,
@@ -73,6 +68,10 @@ const state = {
   },
   viewerMotion: { active: false, scrubbing: false },
   viewerClickTimer: null,
+  // Photo ids whose original file failed to load. Kept per id rather than as a
+  // single flag so moving to another photo and back does not re-attempt a
+  // download that already failed, while the next photo still gets a fresh try.
+  viewerOriginalFailed: new Set(),
   updateChecked: false,
   updateChecking: false,
 };
