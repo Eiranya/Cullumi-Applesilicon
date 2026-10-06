@@ -15,8 +15,8 @@ class DatabaseMigrationTests(unittest.TestCase):
     def test_wal_configuration_is_reused_for_the_same_database_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "project.db"
-            project_store._WAL_CONFIGURED_DATABASES.pop(path.resolve(), None)
-            project_store._INITIALIZED_DATABASES.pop(path.resolve(), None)
+            project_store._WAL_CONFIGURED_DATABASES.pop(path, None)
+            project_store._INITIALIZED_DATABASES.pop(path, None)
             with mock.patch.object(
                 project_store,
                 "_ensure_wal",
@@ -24,13 +24,13 @@ class DatabaseMigrationTests(unittest.TestCase):
             ) as ensure_wal:
                 first = connect_db(path)
                 first.close()
-                identity = project_store._WAL_CONFIGURED_DATABASES[path.resolve()]
+                identity = project_store._WAL_CONFIGURED_DATABASES[path]
 
                 second = connect_db(path)
                 second.close()
             ensure_wal.assert_called_once()
             self.assertEqual(
-                project_store._WAL_CONFIGURED_DATABASES[path.resolve()], identity
+                project_store._WAL_CONFIGURED_DATABASES[path], identity
             )
 
     def test_concurrent_connections_share_initialized_database_safely(self) -> None:
@@ -58,7 +58,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             replacement_conn = connect_db(replacement)
             replacement_conn.execute("PRAGMA journal_mode=DELETE")
             replacement_conn.close()
-            previous_identity = project_store._WAL_CONFIGURED_DATABASES[path.resolve()]
+            previous_identity = project_store._WAL_CONFIGURED_DATABASES[path]
             path.unlink()
             replacement.replace(path)
 
@@ -67,7 +67,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             reopened.close()
             self.assertEqual(mode.lower(), "wal")
             self.assertNotEqual(
-                project_store._WAL_CONFIGURED_DATABASES[path.resolve()],
+                project_store._WAL_CONFIGURED_DATABASES[path],
                 previous_identity,
             )
 
@@ -100,7 +100,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             conn.execute("DROP INDEX idx_capture_variant_representative")
             conn.commit()
             conn.close()
-            project_store._INITIALIZED_DATABASES.pop(path.resolve(), None)
+            project_store._INITIALIZED_DATABASES.pop(path, None)
 
             reopened = connect_db(path)
             version = reopened.execute("PRAGMA user_version").fetchone()[0]
@@ -180,7 +180,7 @@ class DatabaseMigrationTests(unittest.TestCase):
             legacy.execute("PRAGMA user_version=3")
             legacy.commit()
             legacy.close()
-            project_store._INITIALIZED_DATABASES.pop(path.resolve(), None)
+            project_store._INITIALIZED_DATABASES.pop(path, None)
 
             migrated = connect_db(path)
             columns = {

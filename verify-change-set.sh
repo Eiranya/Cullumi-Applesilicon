@@ -86,9 +86,12 @@ cullumi/settings_service.py
 cullumi/similarity.py
 cullumi/updates.py
 tests/test_analysis_worker.py
+tests/test_app.py
 tests/test_capture_variants.py
 tests/test_core.py
+tests/test_database.py
 tests/test_media.py
+tests/test_scanner.py
 tests/test_settings_service.py
 web/css/base.css
 web/css/home.css
@@ -158,20 +161,41 @@ models"
 #   modes (non-TIFF, truncated, out-of-range offset, tag preference).
 #
 # tests/test_core.py
-#   `test_profile_validation` asserted `__version__ == "1.0.5"`, pinning the
-#   port to a literal that upstream changes on every release. This port ships
-#   its own version numbers, so the literal would force an unfreeze per bump --
-#   a frozen test whose only content is a version string protects nothing. The
-#   assertion now checks the shape (three dotted numeric components) instead,
-#   which is what the original was actually reaching for. Verified to still
-#   fail on a malformed value, so it is not vacuous. The rest of the test is
-#   untouched.
+#   Two entries. `test_profile_validation` asserted `__version__ == "1.0.5"`,
+#   pinning the port to a literal upstream changes on every release; it now
+#   checks the semver shape instead, which is what the original reached for and
+#   still fails on a malformed value. `setUp` also resolves the temp directory
+#   now. Without that, Path.resolve() turned "/tmp/..." into
+#   "/private/tmp/..." inside the scanner while the project root stayed
+#   unresolved, so relative_to() raised "not in the subpath" and two discovery
+#   tests failed. macOS only; upstream runs on Windows where /tmp is not a
+#   symlink. The rest of the file is untouched.
+#
+# tests/test_database.py
+#   The WAL tests cleared and read _WAL_CONFIGURED_DATABASES with
+#   path.resolve(), but connect_db keys that dict by the path it was handed.
+#   Identical on Windows; on macOS the resolved form ("/private/tmp/...") never
+#   matches the stored one ("/tmp/...") and both tests raised KeyError. The lookups
+#   now use the same spelling production uses. No assertion was weakened.
+#
+# tests/test_scanner.py
+#   setUp resolved the temp dir for the same reason as test_core: the bounded
+#   dispatch test walks real paths through relative_to().
+#
+# tests/test_app.py
+#   test_api_photo_builds_a_high_resolution_tiff_preview compared mock call
+#   arguments against unresolved paths while api_photo resolves internally, so
+#   the mock never matched. The expected paths are now built from a resolved
+#   root; the assertion itself is unchanged.
 #
 # models/ has no entries and is expected to stay fully identical.
 AUTHORIZED_FROZEN="tests/test_analysis_worker.py
+tests/test_app.py
 tests/test_capture_variants.py
 tests/test_core.py
+tests/test_database.py
 tests/test_media.py
+tests/test_scanner.py
 tests/test_settings_service.py"
 
 # Files this port adds on top of upstream. Whitelisting them closes a real hole:

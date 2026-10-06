@@ -35,7 +35,12 @@ class ScannerIncrementalTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        # Resolve once here so every later comparison -- including the ones
+        # inside relative_to() -- sees one consistent spelling of this path.
+        # On macOS the system temp dir lives under a symlink (/tmp ->
+        # /private/tmp); mixing the two forms makes a child of root appear to
+        # sit outside it.
+        self.root = Path(self.temp.name).resolve()
         self.photos = self.root / "photos"
         self.photos.mkdir()
         self.config = ConfigStore(self.root / "config.json")

@@ -49,7 +49,11 @@ from cullumi.workflows import (
 class CullumiTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.base = Path(self.temp.name)
+        # Resolve once here so every later comparison sees one consistent
+        # spelling of this path. On macOS the system temp dir sits under a
+        # symlink (/tmp -> /private/tmp), and mixing the two forms makes a
+        # discovered file appear to sit outside the project root.
+        self.base = Path(self.temp.name).resolve()
         self.photos = self.base / "photos"
         self.photos.mkdir()
         self.cache = self.base / "cache"

@@ -45,15 +45,28 @@ echo "==> 安装 proxy_tools（绕过 sdist 打包缺陷）"
 # unpack directory, so both `pip install` and `pip download` fail with
 # EEXIST. Downloading the tarball with curl and installing the extracted
 # directory sidesteps pip's unpacker entirely.
-PROXY_TMP="$(mktemp -d "${TMPDIR:-/tmp}/cullumi-proxytools.XXXXXX")"
-if ! "$PY" -m pip download --retries 3 --no-deps --no-binary :all: \
-        -d "$PROXY_TMP" proxy_tools >/dev/null 2>&1; then
-    curl -fsSL -o "$PROXY_TMP/proxy_tools.tar.gz" \
-        "https://files.pythonhosted.org/packages/source/p/proxy_tools/proxy_tools-0.1.0.tar.gz"
-    tar xzf "$PROXY_TMP/proxy_tools.tar.gz" -C "$PROXY_TMP"
+#
+# Two guards matter here. TMPDIR on macOS ends in a slash, so interpolating it
+# directly yields ".../T//name", and the double slash made pip reject the path
+# as a malformed requirement and -- because this script runs under `set -e` --
+# abort the whole build. Strip the trailing slash first. And if proxy_tools
+# already imports, there is nothing to do: reinstalling an unchanged dependency
+# would fail for no gain.
+if "$PY" -c "import proxy_tools" >/dev/null 2>&1; then
+    echo "    proxy_tools 已安装，跳过"
+else
+    PROXY_BASE="${TMPDIR:-/tmp}"
+    PROXY_BASE="${PROXY_BASE%/}"
+    PROXY_TMP="$(mktemp -d "$PROXY_BASE/cullumi-proxytools.XXXXXX")"
+    if ! "$PY" -m pip download --retries 3 --no-deps --no-binary :all: \
+            -d "$PROXY_TMP" proxy_tools >/dev/null 2>&1; then
+        curl -fsSL -o "$PROXY_TMP/proxy_tools.tar.gz" \
+            "https://files.pythonhosted.org/packages/source/p/proxy_tools/proxy_tools-0.1.0.tar.gz"
+        tar xzf "$PROXY_TMP/proxy_tools.tar.gz" -C "$PROXY_TMP"
+    fi
+    "$PY" -m pip install --retries 3 --no-build-isolation "$PROXY_TMP"/proxy_tools-0.1.0
+    rm -rf "$PROXY_TMP"
 fi
-"$PY" -m pip install --retries 3 --no-build-isolation "$PROXY_TMP"/proxy_tools-0.1.0
-rm -rf "$PROXY_TMP"
 
 echo "==> 安装构建与检查工具"
 "$PY" -m pip install --retries 5 pyinstaller==6.16.0 ruff==0.12.12

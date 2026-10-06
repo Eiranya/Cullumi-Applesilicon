@@ -420,7 +420,10 @@ class AppSafetyTests(unittest.TestCase):
 
     def test_api_photo_builds_a_high_resolution_tiff_preview(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            # Resolved so the path spelling matches what api_photo derives
+            # internally; on macOS the temp dir is under a symlink
+            # (/tmp -> /private/tmp) and the mock would miss the call.
+            root = Path(temporary).resolve()
             source = root / "large.tiff"
             thumbnail = root / "cache" / "thumb.jpg"
             preview = root / "cache" / "thumb.display.jpg"
