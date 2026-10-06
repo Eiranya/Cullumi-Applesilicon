@@ -197,10 +197,28 @@ class PhotoAnalysisRunnerTests(unittest.TestCase):
             runner.close()
 
     def test_parallel_capacity_obeys_cpu_and_total_memory_budget(self):
-        for ram, cpus, expected in [(4, 8, 1), (8, 8, 1), (32, 8, 2), (32, 1, 1)]:
+        # Expectations updated when the pool was re-sized: the memory term used
+        # to divide by the 1.5GB per-worker *ceiling*, which made it evaluate to
+        # 2 on every machine and masked the CPU term entirely. It now divides by
+        # the measured worst-case footprint (a 48MP PNG peaks at 622MB while a
+        # 48MP JPEG peaks at 90MB, since only JPEG gets draft() down-scaling),
+        # so the pool scales with memory. The extra assertion below is the
+        # reason this is a fix rather than a loosening: the budget must still
+        # hold when every worker carries its worst-case image at the same time.
+        for ram, cpus, expected in [(4, 8, 1), (8, 8, 2), (32, 8, 4), (32, 1, 1)]:
             with mock.patch.object(worker_module, "_physical_memory_bytes", return_value=ram * 1024**3), \
                     mock.patch.object(worker_module.os, "cpu_count", return_value=cpus):
-                self.assertEqual(worker_module.parallel_worker_count(), expected)
+                count = worker_module.parallel_worker_count()
+                self.assertEqual(count, expected)
+                budget = min(
+                    int(ram * 1024**3 * worker_module.WORKER_MEMORY_BUDGET_FRACTION),
+                    worker_module.WORKER_MEMORY_BUDGET_CEILING,
+                )
+                self.assertLessEqual(
+                    count * worker_module.MEASURED_WORKER_PEAK_BYTES,
+                    budget,
+                    f"{count} workers would exceed the memory budget at worst case",
+                )
 
 
 

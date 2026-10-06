@@ -18,9 +18,35 @@ from .media import analyze_photo, failed_photo_analysis
 from .niqe import initialize_niqe
 
 DEFAULT_ANALYSIS_TIMEOUT_SECONDS = 60.0
-DEFAULT_MAX_TASKS_PER_WORKER = 50
+
+# A worker is restarted after this many tasks. Restarting bounds whatever a
+# long-lived process accumulates, but each one costs ~0.38s (measured: 412ms
+# for the first task vs 34ms for the rest, and importing cullumi.media alone is
+# 180ms). At 50 tasks a 5000-photo scan paid that ~100 times per worker. Raised
+# after measuring three full passes through one process: peak RSS went 122.0 →
+# 122.6MB across 870 tasks, i.e. the footprint plateaus rather than creeping, so
+# the low cap was buying no real protection.
+DEFAULT_MAX_TASKS_PER_WORKER = 500
+
+# Safety ceilings handed to the worker (enforced via a job object on Windows).
 MIN_WORKER_MEMORY_BYTES = 512 * 1024 * 1024
 MAX_WORKER_MEMORY_BYTES = 1536 * 1024 * 1024
+
+# What one worker must be assumed to hold. This is the WORST CASE, not the
+# average: measured per image in an isolated process, a 48MP JPEG peaks at
+# 89.6MB while a 48MP PNG peaks at 622.3MB, because JPEG goes through
+# draft() down-scaling and PNG/HEIC decode at full resolution. Sizing the pool
+# by the ~130MB average over a mostly-JPEG library would let 6 workers hold
+# 3.65GB and blow the budget below.
+MEASURED_WORKER_PEAK_BYTES = 640 * 1024 * 1024
+
+# Share of physical memory the analysis pool may occupy, and its absolute cap.
+WORKER_MEMORY_BUDGET_FRACTION = 0.20
+WORKER_MEMORY_BUDGET_CEILING = 3 * 1024**3
+
+# Above the memory bound more workers stop paying: measured 4 workers 3.49s vs
+# 6 workers 3.28s on a 290-photo library (a further 6%), for 50% more memory.
+MAX_PARALLEL_WORKERS = 6
 
 
 class AnalysisCancelled(Exception):
@@ -303,8 +329,25 @@ class PhotoAnalysisRunner:
 
 
 def parallel_worker_count() -> int:
-    budget = min(int(_physical_memory_bytes() * 0.20), 3 * 1024**3)
-    return max(1, min(2, (os.cpu_count() or 1) - 1, budget // default_worker_memory_limit()))
+    """How many analysis processes to run at once.
+
+    Bounded by the memory budget, one fewer than the logical core count, and a
+    hard cap. The memory term divides by the worst-case per-worker footprint
+    rather than the 1.5GB safety ceiling: using the ceiling made this evaluate
+    to 2 on every machine, which masked the CPU term and left a 10-core machine
+    running 2 workers regardless of how much memory it had.
+
+    On a 16GB/10-core machine this returns 4. Measured scan of a 290-photo
+    library: 2 workers 5.23s -> 4 workers 3.49s (1.50x). Six would reach 3.28s
+    but needs 3.65GB at worst case, above the 3GB budget, so it is not used.
+    """
+    budget = min(
+        int(_physical_memory_bytes() * WORKER_MEMORY_BUDGET_FRACTION),
+        WORKER_MEMORY_BUDGET_CEILING,
+    )
+    by_memory = max(1, budget // MEASURED_WORKER_PEAK_BYTES)
+    by_cpu = max(1, (os.cpu_count() or 1) - 1)
+    return max(1, min(MAX_PARALLEL_WORKERS, by_cpu, by_memory))
 
 
 class PhotoAnalysisPool:

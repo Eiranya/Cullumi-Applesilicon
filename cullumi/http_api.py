@@ -7,6 +7,7 @@ import os
 import re
 import secrets
 import stat
+import sys
 import urllib.parse
 import webbrowser
 import xml.etree.ElementTree as ET
@@ -32,7 +33,8 @@ from .decision_service import (
     mark_ai_remove_suggestions,
     set_photo_decision,
 )
-from .face_analysis import FaceAnalyzer
+from .display_asset import ensure_display_asset
+from .face_analysis import FaceAnalyzer, accelerator_tag, configure_accelerator
 from .media import (
     DISPLAY_PREVIEW_EXTENSIONS,
     ensure_display_preview,
@@ -616,6 +618,11 @@ class Handler(BaseHTTPRequestHandler):
                     "confirm_accept_suggestions", True
                 ),
                 "auto_check_updates": config_data.get("auto_check_updates", True),
+                "blink_gpu_enabled": config_data.get("blink_gpu_enabled", True),
+                # The preference above is the user's intent; this reports what
+                # inference will ACTUALLY use, so the settings page can tell the
+                # user when an accelerator silently fell back to CPU.
+                "blink_gpu_active": accelerator_tag() == "coreml",
                 "motion_cover_writeback": config_data.get(
                     "motion_cover_writeback", "ask"
                 ),
@@ -668,7 +675,27 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_thumb(self) -> None:
         project, row = self._photo_row()
-        self._send_file(project_thumbnail_path(project, row["thumbnail"]), "image/jpeg")
+        thumbnail = project_thumbnail_path(project, row["thumbnail"])
+        # 可选的精确供给尺寸（preview-sharpness）：浏览器按卡片图片框的
+        # 设备像素数追加 &w=。不带 w 的链接（旧链接 / 项目封面）沿用历史行为，
+        # 直接发 512 分析缩略图。
+        raw = self._query().get("w", [""])[0]
+        if not raw:
+            self._send_file(thumbnail, "image/jpeg")
+            return
+        try:
+            width = int(raw)
+        except ValueError as error:
+            raise ValueError("w 必须是整数") from error
+        try:
+            asset = ensure_display_asset(thumbnail, width)
+        except ValueError:
+            # 越界宽度是调用方的错，原样上抛为 400。
+            raise
+        except (OSError, RuntimeError):
+            # 512 缩略图不可读 / 生成失败：退化为旧行为，胜过给用户一个坏图。
+            asset = thumbnail
+        self._send_file(asset, "image/jpeg")
 
     def api_photo(self) -> None:
         project, row = self._photo_row()
@@ -824,7 +851,10 @@ class Handler(BaseHTTPRequestHandler):
         if not update["update_available"]:
             raise ValueError("当前已经是最新版本")
         if not update["download_available"]:
-            raise ValueError("最新版本没有可下载的 Windows 附件，请前往发布页查看")
+            platform_name = "macOS" if sys.platform == "darwin" else "Windows"
+            raise ValueError(
+                f"最新版本没有可下载的 {platform_name} 附件，请前往发布页查看"
+            )
         path = download_release_asset(update["download_url"], update["asset_name"])
         self._send_json({"downloaded": True, "path": str(path), "version": update["latest_version"]})
 
@@ -945,12 +975,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def api_settings(self, body: dict[str, Any]) -> None:
         settings = save_settings(self.config, body)
+        if "blink_gpu_enabled" in body:
+            # Apply the new provider preference immediately and drop the live
+            # sessions, which are long-lived and would otherwise keep running on
+            # the old provider. Cached blink verdicts invalidate themselves
+            # because the provider is part of the input fingerprint.
+            configure_accelerator(bool(body["blink_gpu_enabled"]))
+            analyzer = getattr(self.scanner, "face_analyzer", None)
+            if analyzer is not None:
+                analyzer.reset_sessions()
         project_id = str(body.get("project_id") or "")
         if project_id:
             self.similarity_groups.invalidate(project_id)
         self._send_json({
             "saved": True,
             "settings": settings,
+            "blink_gpu_active": accelerator_tag() == "coreml",
         })
 
     def api_profile_save(self, body: dict[str, Any]) -> None:

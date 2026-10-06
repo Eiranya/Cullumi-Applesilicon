@@ -43,6 +43,7 @@ const state = {
     selectedId: "",
     mode: "closed",
     listSearch: "",
+    statusFilter: "all",
     memberSearch: "",
     detail: null,
     formatCategories: [],

@@ -247,7 +247,9 @@ async function loadLibraryPage(reset = false) {
     $("#gallery").insertAdjacentHTML(
       "beforeend",
       data.items
-        .map((photo, index) => photoCard(photo, start + index))
+        .map((photo, index) =>
+          photoCard(photo, start + index, "", "", "", CARD_THUMB_BOX),
+        )
         .join(""),
     );
     $("#viewSubtitle").textContent =
@@ -336,12 +338,23 @@ function variantFormatText(p, compact = false) {
     return `${formats.slice(0, 2).join(" + ")} +${formats.length - 2}`;
   return formats.join(" + ");
 }
+// 卡片图片框尺寸的唯一事实来源（与 web/css/base.css 的 .gallery 列宽一一对应）。
+// 列宽 215 − 卡片左右各 1px 边框（全局 box-sizing:border-box）= 图片框 213 CSS px。
+const CARD_COLUMN = 215;
+const CARD_BORDER = 1;
+const CARD_THUMB_BOX = CARD_COLUMN - 2 * CARD_BORDER;
+// 供给尺寸 = 取整后的显示框设备像素，倍率恒为 1.00，浏览器不再重采样。
+function cardThumbUrl(base, boxCss) {
+  const dpr = window.devicePixelRatio || 1;
+  return `${base}&w=${Math.round(boxCss * dpr)}`;
+}
 function photoCard(
   p,
   index,
   customBadge = "",
   customKind = "",
   extraInfo = "",
+  thumbBoxCss = null,
 ) {
   const badge =
     customBadge ||
@@ -372,12 +385,16 @@ function photoCard(
     : "data-analysis-badge";
   const variantText = variantFormatText(p, true),
     fullVariantText = variantFormatText(p);
-  return `<article class="photo-card ${decisionClass}" data-photo-id="${p.id}"><div class="thumb" data-open-id="${p.id}"><img loading="lazy" src="${p.thumb_url}" alt="">${p.media_type === "motion_photo" ? `<span class="live-mark card-live-mark" aria-label="动态照片">${LIVE_PHOTO_ICON}</span>` : ""}${badge ? `<span class="badge badge-${badgeKind}" ${badgeAttribute}>${esc(badge)}</span>` : ""}${variantText ? `<span class="variant-badge" title="关联格式：${esc(fullVariantText)}">${esc(variantText)}</span>` : ""}</div><div class="card-info"><b title="${esc(p.relative_path)}">${esc(p.relative_path.split("/").pop())}</b><small>${esc(cardDetailText(p))}</small>${extraInfo ? `<span class="similarity-score">${esc(extraInfo)}</span>` : ""}</div><div class="card-actions"><button class="keep" data-decision="keep" data-id="${p.id}">保留</button><button class="danger" data-decision="remove" data-id="${p.id}">移除</button></div></article>`;
+  // thumbBoxCss 为 null 时退回原始 URL（相似视图等保持既有 512 行为不变）。
+  const thumbSrc = thumbBoxCss
+    ? cardThumbUrl(p.thumb_url, thumbBoxCss)
+    : p.thumb_url;
+  return `<article class="photo-card ${decisionClass}" data-photo-id="${p.id}"><div class="thumb" data-open-id="${p.id}"><img loading="lazy" src="${thumbSrc}" alt="">${p.media_type === "motion_photo" ? `<span class="live-mark card-live-mark" aria-label="动态照片">${LIVE_PHOTO_ICON}</span>` : ""}${badge ? `<span class="badge badge-${badgeKind}" ${badgeAttribute}>${esc(badge)}</span>` : ""}${variantText ? `<span class="variant-badge" title="关联格式：${esc(fullVariantText)}">${esc(variantText)}</span>` : ""}</div><div class="card-info"><b title="${esc(p.relative_path)}">${esc(p.relative_path.split("/").pop())}</b><small>${esc(cardDetailText(p))}</small>${extraInfo ? `<span class="similarity-score">${esc(extraInfo)}</span>` : ""}</div><div class="card-actions"><button class="keep" data-decision="keep" data-id="${p.id}">保留</button><button class="danger" data-decision="remove" data-id="${p.id}">移除</button></div></article>`;
 }
 function renderPhotos(items, total) {
   $("#viewSubtitle").textContent = `显示 ${items.length} / ${total}`;
   $("#gallery").innerHTML = items
-    .map((photo, index) => photoCard(photo, index))
+    .map((photo, index) => photoCard(photo, index, "", "", "", CARD_THUMB_BOX))
     .join("");
   const empty = !items.length;
   $("#empty").classList.toggle("hidden", !empty);
@@ -545,6 +562,8 @@ async function setDecision(id, decision, fromViewer = true) {
       Object.assign(similarMember, photo);
     updateCardDecision(photo.id, photo.decision);
   });
+  // Keep the group's processing badge in step with the decisions just applied.
+  refreshSelectedGroupStatus();
   applyProjectCounts(result.project_counts);
   if (fromViewer) {
     state.viewerNeedsRefresh = true;
@@ -706,6 +725,8 @@ function selectNavigationView(event) {
   if (next === "similar") {
     $("#searchInput").value = state.similar.listSearch;
     $("#searchInput").placeholder = "搜索相似组中的照片";
+    const statusSelect = $("#similarStatusFilter");
+    if (statusSelect) statusSelect.value = state.similar.statusFilter;
   } else {
     $("#searchInput").placeholder = "搜索照片";
   }

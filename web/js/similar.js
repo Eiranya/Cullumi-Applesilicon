@@ -1,3 +1,51 @@
+// Processing status of a similarity group. Derived server-side from the
+// decisions of every member, so it always matches what the group actually
+// contains -- a group's membership changes when a rescan merges or splits it,
+// and a stored copy would go stale at that moment.
+const GROUP_STATUS_META = {
+  untouched: { label: "未处理", hint: "这一组还没有做出任何决定" },
+  partial: { label: "部分处理", hint: "这一组只有部分照片做出了决定" },
+  done: { label: "已处理", hint: "这一组每张照片都已做出决定" },
+};
+
+function similarGroupStatusMeta(group) {
+  // An unrecognised or missing status counts as untouched, so a group payload
+  // from an older response still renders instead of showing "undefined".
+  const key = GROUP_STATUS_META[group?.status] ? group.status : "untouched";
+  const meta = GROUP_STATUS_META[key];
+  const decided = Number.isFinite(group?.decided_count)
+    ? group.decided_count
+    : 0;
+  return {
+    key,
+    label: meta.label,
+    hint: `${meta.hint}（${decided}/${group?.count ?? 0}）`,
+  };
+}
+
+function similarStatusFilterLabel(value) {
+  return (
+    {
+      all: "全部状态",
+      untouched: "未处理",
+      partial: "部分处理",
+      done: "已处理",
+    }[value] || "全部状态"
+  );
+}
+
+function syncSimilarStatusHint(total) {
+  const hint = $("#similarStatusHint");
+  if (!hint) return;
+  const filter = state.similar.statusFilter;
+  if (filter === "all") {
+    hint.textContent = "";
+    return;
+  }
+  const label = similarStatusFilterLabel(filter);
+  hint.textContent = total ? `${total} 组「${label}」` : `没有「${label}」的相似组`;
+}
+
 function similarFolder(group, compact = false) {
   const coverImages = group.covers
     .map(
@@ -7,7 +55,8 @@ function similarFolder(group, compact = false) {
     .reverse()
     .join("");
   const name = group.recommended.relative_path.split("/").pop();
-  return `<button class="similar-folder ${compact ? "compact" : ""} ${group.id === state.similar.selectedId ? "active" : ""}" data-similar-group="${group.id}"><span class="folder-stack">${coverImages}<i>${group.count} 张</i></span><span class="folder-caption"><b title="${esc(group.recommended.relative_path)}">${esc(name)}</b><small>${group.kind === "exact" ? "完全重复" : `${group.count} 张相似照片`}</small></span></button>`;
+  const status = similarGroupStatusMeta(group);
+  return `<button class="similar-folder ${compact ? "compact" : ""} ${group.id === state.similar.selectedId ? "active" : ""}" data-similar-group="${group.id}"><span class="folder-stack">${coverImages}<i>${group.count} 张</i><em class="folder-status" data-status="${status.key}" title="${esc(status.hint)}">${status.label}</em></span><span class="folder-caption"><b title="${esc(group.recommended.relative_path)}">${esc(name)}</b><small>${group.kind === "exact" ? "完全重复" : `${group.count} 张相似照片`}</small></span></button>`;
 }
 function renderSimilarFolders() {
   const selected = !!state.similar.selectedId;
@@ -176,6 +225,7 @@ async function loadSimilarView(reset = false) {
     params = new URLSearchParams({
       project_id: state.project.id,
       search: state.similar.listSearch,
+      status: state.similar.statusFilter,
       limit: String(SIMILAR_GROUP_PAGE_SIZE),
       offset: String(state.similar.offset),
     });
@@ -204,10 +254,28 @@ async function loadSimilarView(reset = false) {
       }
     } else if (!state.similar.selectedId) {
       state.items = [];
+      // The subtitle names the scope so a filtered list never reads as the
+      // whole library: "3 组未处理" rather than "3 组相似照片".
+      const scope =
+        state.similar.statusFilter === "all"
+          ? "相似照片"
+          : similarStatusFilterLabel(state.similar.statusFilter);
       $("#viewSubtitle").textContent =
-        `${list.total} 组相似照片${state.similar.groups.some((group) => group.face_safe) ? " · 人物照片请检查表情" : ""}`;
+        `${list.total} 组${scope}${state.similar.groups.some((group) => group.face_safe) ? " · 人物照片请检查表情" : ""}`;
       $("#empty").classList.toggle("hidden", !!list.total);
+      if (!list.total && state.similar.statusFilter !== "all") {
+        // A filter that matches nothing must not reuse the "scan first" copy:
+        // the library does have groups, this status just has none of them.
+        const label = similarStatusFilterLabel(state.similar.statusFilter);
+        $("#emptyTitle").textContent = "没有符合筛选的相似组";
+        $("#emptyText").textContent =
+          `当前筛选为「${label}」。换一个状态，或选回「全部状态」。`;
+      } else {
+        $("#emptyTitle").textContent = "这里还没有内容";
+        $("#emptyText").textContent = "扫描完成后会显示结果。";
+      }
     }
+    syncSimilarStatusHint(list.total);
   } finally {
     if (generation === state.similar.generation) {
       state.similar.loading = false;
@@ -362,6 +430,38 @@ function similarGroupComplete() {
   return members.length > 0 && members.every((photo) => photo.decision);
 }
 
+// Recompute the open group's status from its (already patched) members and
+// update just that badge. A full re-render would rebuild every card in the
+// sidebar on each decision; refetching would discard the optimistic local
+// state the caller just applied.
+function refreshSelectedGroupStatus() {
+  const detail = state.similar.detail;
+  if (!detail?.id) return;
+  const members = detail.members || [];
+  const decided = members.filter((photo) => photo.decision).length;
+  const status =
+    !members.length || !decided
+      ? "untouched"
+      : decided === members.length
+        ? "done"
+        : "partial";
+  const group = state.similar.groups.find((item) => item.id === detail.id);
+  if (!group) return;
+  detail.status = status;
+  detail.decided_count = decided;
+  if (group.status === status && group.decided_count === decided) return;
+  group.status = status;
+  group.decided_count = decided;
+  const badge = document.querySelector(
+    `.similar-folder[data-similar-group="${detail.id}"] .folder-status`,
+  );
+  if (!badge) return;
+  const meta = similarGroupStatusMeta(group);
+  badge.dataset.status = meta.key;
+  badge.textContent = meta.label;
+  badge.title = meta.hint;
+}
+
 async function advanceSimilarGroup(keepViewer = false) {
   if (
     state.view !== "similar" ||
@@ -390,6 +490,12 @@ function bindSimilarEvents() {
   $("#similarBackBtn").onclick = () => closeSimilarDetail();
   $("#similarExpandBtn").onclick = expandSimilarDetail;
   $("#similarCloseBtn").onclick = collapseSimilarDetail;
+  $("#similarStatusFilter").onchange = (event) => {
+    // A new filter describes a different list, so the accumulated pages have
+    // to go: they were fetched under the previous status.
+    state.similar.statusFilter = event.target.value;
+    loadSimilarView(true).catch((error) => toast(error.message));
+  };
   $("#similarFolderPane").onclick = (event) => {
     if (
       state.similar.mode === "side" &&

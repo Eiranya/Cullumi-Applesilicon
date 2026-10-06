@@ -1,0 +1,13 @@
+# Cullumi macOS runtime lock for Python 3.13+ on Apple Silicon.
+#
+# Derived from ../cullumi-src/requirements.txt. The Windows-only packages that
+# appear in requirements.lock (pythonnet, clr-loader, proxy-tools, bottle) are
+# intentionally removed: they only exist to host the Edge WebView2 backend.
+# macOS uses pywebview's WKWebView backend, which needs pyobjc instead.
+numpy==2.3.5
+Pillow==12.2.0
+pillow-heif==1.7.0
+rawpy==0.25.1
+pywebview==6.1
+imageio-ffmpeg==0.6.0
+onnxruntime==1.29.0

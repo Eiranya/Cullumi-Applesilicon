@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import threading
 from dataclasses import dataclass
@@ -14,6 +15,8 @@ from PIL import Image
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
+
+logger = logging.getLogger(__name__)
 
 
 MODEL_VERSION = "yunet-2023mar+ocec-c-2025.10:v1"
@@ -39,6 +42,107 @@ YU_OUTPUT_NAMES = (
     "kps_16",
     "kps_32",
 )
+
+# ---------------------------------------------------------------------------
+# Execution provider (hardware acceleration)
+# ---------------------------------------------------------------------------
+#
+# Blink detection is the heaviest per-photo inference in a scan. On Apple
+# Silicon, onnxruntime ships a CoreML execution provider that dispatches to the
+# GPU/ANE; measured on an M5 it is ~5.3x faster for YuNet and ~4.0x for the eye
+# classifier. It is opt-out rather than opt-in, but every path degrades to the
+# CPU provider so a missing or unhappy accelerator can never break a scan.
+#
+# The resolved provider is folded into `FaceAnalyzer.input_fingerprint` so that
+# flipping the preference invalidates cached results. That matters because the
+# two providers do NOT agree bit-for-bit, and how far apart they land depends
+# heavily on the input: on emoji faces the per-eye open-probability differed by
+# 1e-4..5e-3 while the aggregate blink_confidence moved only ~2e-4, and an
+# independent harness reproduced a single-eye delta as large as 7e-2. Without
+# the tag in the fingerprint, `Scanner.blink_rescan_required` would see an
+# unchanged fingerprint, skip the recompute, and leave the database holding a
+# silent mix of results from two different providers.
+#
+# The state below is module-level on purpose. `input_fingerprint` is a
+# `@staticmethod` invoked both through an instance and through the class itself
+# (see `Scanner.blink_rescan_required`), so it has no instance to read from.
+ACCELERATOR_PROVIDER = "CoreMLExecutionProvider"
+CPU_PROVIDER = "CPUExecutionProvider"
+
+_accelerator_preference = True
+# Flipped after a real load failure so we stop retrying a provider that cannot
+# work on this machine, and so the fingerprint settles on what is actually used.
+_accelerator_disabled = False
+_provider_probe: list[str] | None = None
+_tag_cache: str | None = None
+
+
+def available_providers() -> list[str]:
+    """Report onnxruntime's providers, or [] when it is not importable."""
+    global _provider_probe
+    if _provider_probe is None:
+        try:
+            import onnxruntime as ort
+
+            _provider_probe = list(ort.get_available_providers())
+        except Exception as error:  # pragma: no cover - import/env failure
+            logger.warning("无法读取 onnxruntime 执行后端列表：%s", error)
+            _provider_probe = []
+    return _provider_probe
+
+
+def accelerator_usable() -> bool:
+    """True when the accelerator is both preferred and actually available."""
+    return (
+        _accelerator_preference
+        and not _accelerator_disabled
+        and ACCELERATOR_PROVIDER in available_providers()
+    )
+
+
+def accelerator_tag() -> str:
+    """Short tag for the provider inference will use ('coreml' or 'cpu').
+
+    Deliberately computable WITHOUT creating a session: `blink_rescan_required`
+    checks cached fingerprints without loading any model.
+    """
+    global _tag_cache
+    if _tag_cache is None:
+        _tag_cache = "coreml" if accelerator_usable() else "cpu"
+    return _tag_cache
+
+
+def configure_accelerator(enabled: bool) -> str:
+    """Set the process-wide accelerator preference; return the resulting tag.
+
+    Enabling clears any earlier load failure, so an explicit user action always
+    gets one fresh attempt -- otherwise the setting could read "on" while
+    inference silently stayed on CPU for the rest of the session.
+
+    Takes effect the next time a session is created. Callers that need it
+    applied immediately should also call `FaceAnalyzer.reset_sessions()`.
+    """
+    global _accelerator_preference, _accelerator_disabled, _tag_cache
+    _accelerator_preference = bool(enabled)
+    if enabled:
+        _accelerator_disabled = False
+    _tag_cache = None
+    return accelerator_tag()
+
+
+def _demote_accelerator(error: BaseException) -> None:
+    """Record that the accelerator failed to load, so we stop choosing it."""
+    global _accelerator_disabled, _tag_cache
+    _accelerator_disabled = True
+    _tag_cache = None
+    logger.warning("核心加速不可用，已回退 CPU 推理：%s", error)
+
+
+def provider_chain() -> list[str]:
+    """Provider list for `InferenceSession`, accelerator first when usable."""
+    if accelerator_usable():
+        return [ACCELERATOR_PROVIDER, CPU_PROVIDER]
+    return [CPU_PROVIDER]
 
 
 @dataclass(frozen=True)
@@ -94,7 +198,13 @@ def empty_blink_values(status: str = "not_analyzed", error: str = "") -> dict[st
 
 
 class FaceAnalyzer:
-    """Lazy, CPU-only face and eye-state inference over cached thumbnails."""
+    """Lazy face and eye-state inference over cached thumbnails.
+
+    Inference prefers the CoreML execution provider (GPU/ANE on Apple Silicon)
+    and degrades to CPU when it is unavailable or fails to initialise. See the
+    module-level provider notes for why the chosen provider is folded into the
+    cache fingerprint.
+    """
 
     def __init__(self, model_root: Path):
         self.model_root = model_root
@@ -104,6 +214,16 @@ class FaceAnalyzer:
         self._eye_session: Any | None = None
         self._session_lock = threading.RLock()
         self._inference_lock = threading.Lock()
+
+    def reset_sessions(self) -> None:
+        """Discard cached sessions so the next call re-resolves the provider.
+
+        Used when the user flips the acceleration preference: the sessions are
+        long-lived and would otherwise keep running on the old provider.
+        """
+        with self._session_lock:
+            self._face_session = None
+            self._eye_session = None
 
     def _sessions(self) -> tuple[Any, Any]:
         with self._session_lock:
@@ -124,14 +244,42 @@ class FaceAnalyzer:
             options.intra_op_num_threads = 1
             options.inter_op_num_threads = 1
             options.log_severity_level = 3
-            providers = ["CPUExecutionProvider"]
-            self._face_session = ort.InferenceSession(
-                str(self.face_model), sess_options=options, providers=providers
-            )
-            self._eye_session = ort.InferenceSession(
-                str(self.eye_model), sess_options=options, providers=providers
-            )
+            self._face_session, self._eye_session = self._create_sessions(ort, options)
             return self._face_session, self._eye_session
+
+    def _create_sessions(self, ort: Any, options: Any) -> tuple[Any, Any]:
+        """Build both sessions, degrading to CPU if the accelerator fails.
+
+        A CoreML load can fail for reasons outside the application's control
+        (unsupported operator, ANE contention, managed-device policy). Blink
+        detection must still work -- only slower -- instead of taking the whole
+        scan down, so the failure is recorded and retried once on CPU.
+
+        The fallback is whole-pipeline rather than per-model: a mixed pair
+        would make the fingerprint tag dishonest about what actually ran.
+        """
+        providers = provider_chain()
+        if providers[0] == ACCELERATOR_PROVIDER:
+            try:
+                face_session = ort.InferenceSession(
+                    str(self.face_model), sess_options=options, providers=providers
+                )
+                eye_session = ort.InferenceSession(
+                    str(self.eye_model), sess_options=options, providers=providers
+                )
+            except Exception as error:
+                _demote_accelerator(error)
+            else:
+                logger.info("眨眼检测推理后端：%s", ACCELERATOR_PROVIDER)
+                return face_session, eye_session
+        return (
+            ort.InferenceSession(
+                str(self.face_model), sess_options=options, providers=[CPU_PROVIDER]
+            ),
+            ort.InferenceSession(
+                str(self.eye_model), sess_options=options, providers=[CPU_PROVIDER]
+            ),
+        )
 
     @staticmethod
     def input_fingerprint(
@@ -147,6 +295,10 @@ class FaceAnalyzer:
             "cover_time_ms": int(row["cover_time_ms"] or 0),
             "cover_revision": int(row["cover_revision"] or 0),
             "model": MODEL_VERSION,
+            # Fold the inference backend in: CoreML and CPU agree on the model
+            # version but not bit-for-bit on the numbers, so switching providers
+            # must invalidate cached verdicts rather than silently reuse them.
+            "provider": accelerator_tag(),
             "thresholds": thresholds.fingerprint(),
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
@@ -282,8 +434,12 @@ class FaceAnalyzer:
         detailed: bool = False,
     ) -> dict[str, Any]:
         thresholds = BlinkThresholds.from_profile(profile)
-        fingerprint = self.input_fingerprint(thumbnail, row, thresholds)
+        # Resolve the sessions BEFORE the fingerprint. Creating them is what
+        # settles which provider is actually usable (a failed accelerator load
+        # demotes it), so fingerprinting first could tag a result with a
+        # provider it was not computed on.
         face_session, eye_session = self._sessions()
+        fingerprint = self.input_fingerprint(thumbnail, row, thresholds)
         with self._inference_lock:
             canvas = self._prepare_canvas(thumbnail)
             try:
@@ -405,11 +561,18 @@ class FaceAnalyzer:
 
 
 __all__ = [
+    "ACCELERATOR_PROVIDER",
     "BlinkThresholds",
+    "CPU_PROVIDER",
     "FaceAnalyzer",
     "FaceDetection",
-    "MODEL_VERSION",
     "MODEL_SHA256",
+    "MODEL_VERSION",
     "YU_OUTPUT_NAMES",
+    "accelerator_tag",
+    "accelerator_usable",
+    "available_providers",
+    "configure_accelerator",
     "empty_blink_values",
+    "provider_chain",
 ]

@@ -183,8 +183,11 @@ class SettingsServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             config_path = Path(temporary) / "config.json"
             config = ConfigStore(config_path)
-            self.assertFalse(config.snapshot()["fast_analysis"])
+            # Parallel analysis is enabled by default now, so the round trip is
+            # asserted in the OFF direction -- that is the transition the default
+            # no longer covers, and the one a user makes in the settings panel.
+            self.assertTrue(config.snapshot()["fast_analysis"])
             with self.assertRaises(ValueError):
                 save_settings(config, {"fast_analysis": "yes"})
-            save_settings(config, {"fast_analysis": True})
-            self.assertTrue(ConfigStore(config_path).snapshot()["fast_analysis"])
+            save_settings(config, {"fast_analysis": False})
+            self.assertFalse(ConfigStore(config_path).snapshot()["fast_analysis"])

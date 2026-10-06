@@ -392,11 +392,20 @@ function renderReleaseNotesMarkdown(target, markdown) {
   flushParagraph();
   flushCode();
 }
+function hostPlatformName(update) {
+  // Prefer the platform reported by the backend: it reflects the packaged
+  // build, whereas the user agent only reflects the embedded WebView.
+  if (update && update.platform) return update.platform;
+  const ua = navigator.userAgent || "";
+  if (/Macintosh|Mac OS X/i.test(ua)) return "macOS";
+  return "Windows";
+}
 function showUpdatePrompt(update) {
+  const platform = hostPlatformName(update);
   $("#updateTitle").textContent = `发现新版本 v${update.latest_version}`;
   $("#updateBody").innerHTML = update.download_available
     ? `<p>当前版本为 v${esc(update.current_version)}，是否将 <b>${esc(update.asset_name)}</b> 下载到系统 Downloads 文件夹？</p><p id="updateDownloadStatus" class="update-download-status">照片和项目数据不会受到影响。</p>`
-    : `<p>当前版本为 v${esc(update.current_version)}，新版本已经发布，但发布页没有可直接下载的 Windows 附件。</p><p id="updateDownloadStatus" class="update-download-status">可以前往 Releases 页面查看详情。</p>`;
+    : `<p>当前版本为 v${esc(update.current_version)}，新版本已经发布，但发布页没有可直接下载的 ${esc(platform)} 附件。</p><p id="updateDownloadStatus" class="update-download-status">可以前往 Releases 页面查看详情。</p>`;
   renderReleaseNotesMarkdown(
     $("#updateReleaseNotesBody"),
     update.release_notes,
@@ -779,6 +788,17 @@ function configureProfileInputs() {
   });
 }
 
+// The switch records the user's intent; `active` is what the backend reports
+// it will really use. Keeping the two separate means a Mac that cannot offer
+// the accelerator says so instead of silently showing "on".
+function renderBlinkGpuStatus(enabled, active) {
+  const node = $("#blinkGpuStatus");
+  if (!node) return;
+  if (!enabled) node.textContent = "已关闭，使用 CPU 检测。";
+  else if (active) node.textContent = "已启用，正在使用硬件加速。";
+  else node.textContent = "已启用，但此设备不可用，已回退到 CPU。";
+}
+
 function bindSettingsEvents() {
   $("#settingsBtn").onclick = () => {
     $("#settings").showModal();
@@ -838,6 +858,26 @@ function bindSettingsEvents() {
     } catch (error) {
       input.checked = previous;
       toast(`保存失败：${error.message}`);
+    } finally {
+      input.disabled = false;
+    }
+  };
+  $("#blinkGpu").onchange = async (event) => {
+    const input = event.target,
+      previous = state.settings.blink_gpu_enabled !== false;
+    input.disabled = true;
+    try {
+      const saved = await json("/api/settings", {
+        blink_gpu_enabled: input.checked,
+      });
+      state.settings.blink_gpu_enabled = input.checked;
+      // The backend reports what inference will ACTUALLY use, which can differ
+      // from the switch when this Mac cannot offer the accelerator.
+      state.settings.blink_gpu_active = saved.blink_gpu_active !== false;
+      renderBlinkGpuStatus(input.checked, state.settings.blink_gpu_active);
+    } catch (error) {
+      input.checked = previous;
+      toast(`保存硬件加速设置失败：${error.message}`);
     } finally {
       input.disabled = false;
     }

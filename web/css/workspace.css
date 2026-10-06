@@ -768,6 +768,28 @@ body.similar-side-open .similar-browser {
   padding: 10px 10px 24px;
 }
 
+/* Status filter for the group list. Sits above the grid so the control and
+   the things it filters read as one unit. */
+.similar-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 10px 0;
+}
+
+.similar-status-select {
+  flex: none;
+}
+
+.similar-status-select select {
+  min-width: 132px;
+}
+
+.similar-status-hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .similar-folder {
   min-width: 0;
   padding: 12px;
@@ -862,6 +884,33 @@ body.similar-side-open .similar-browser {
   font-weight: 700;
 }
 
+/* Group processing status. Deliberately on the opposite corner from the count
+   chip so the two never contend for space, and coloured through the theme
+   variables that exist in both day and night: untouched recedes, partial asks
+   for attention, done reads as finished. */
+.folder-status {
+  position: absolute;
+  z-index: 7;
+  left: 8px;
+  top: 8px;
+  padding: 4px 8px;
+  border-radius: 7px;
+  color: #fff;
+  background: rgba(13, 16, 14, 0.76);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.folder-status[data-status="partial"] {
+  background: var(--pink);
+}
+
+.folder-status[data-status="done"] {
+  background: var(--keep);
+}
+
 .folder-caption {
   display: block;
   min-width: 0;
@@ -938,6 +987,11 @@ body.similar-side-open .similar-browser {
 
 .similar-detail-gallery {
   grid-template-columns: repeat(auto-fill, minmax(210px, 210px));
+  /* 与 .gallery 共用类名（index.html 的 #similarDetailGallery 同时带两侧）：
+
+     .gallery 新增的 space-between 会泄漏进来并改变相似详情布局，此处显式覆盖回
+     start，保持该视图外观与改动前一致。 */
+  justify-content: start;
   padding: 2px 2px 24px;
 }
 

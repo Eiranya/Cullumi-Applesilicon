@@ -1,11 +1,23 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 
 def _run_powershell_dialog(script: str) -> str:
+    """Run the Windows-only WinForms fallback, or return "" on other platforms.
+
+    Callers only reach this function when ``_webview_dialog`` returned
+    ``None``. On macOS the pywebview Cocoa backend maps these dialogs onto the
+    native ``NSOpenPanel``/``NSSavePanel``, so a ``None`` result means "the user
+    cancelled" rather than "no dialog backend available". Shelling out to
+    ``powershell.exe`` there would raise ``FileNotFoundError`` and surface as an
+    opaque HTTP 500, so treat every non-Windows platform as a cancellation.
+    """
+    if sys.platform != "win32":
+        return ""
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-STA", "-Command", script],

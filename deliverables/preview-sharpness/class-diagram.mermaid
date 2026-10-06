@@ -1,0 +1,87 @@
+classDiagram
+    direction LR
+
+    class DisplayAsset {
+        <<module  cullumi/display_asset.py (新增)>>
+        +int ASSET_JPEG_QUALITY = 95
+        +int ASSET_JPEG_SUBSAMPLING = 0
+        +str ASSET_FORMAT_TAG = "q95-s444"
+        +int MIN_ASSET_WIDTH = 32
+        +int MAX_ASSET_WIDTH = 1024
+        +int _ASSET_LOCKS[64]
+        +display_asset_path(thumbnail: Path, width: int) Path
+        +ensure_display_asset(thumbnail: Path, width: int) Path
+        -_build_display_asset(thumbnail: Path, width: int) Path
+        -_prune_stale_assets(thumbnail: Path, width: int, keep_name: str) None
+    }
+
+    class Handler {
+        <<class  cullumi/http_api.py (既有, 修改 api_thumb)>>
+        +GET_ROUTES["/api/thumb"] = "api_thumb"
+        +_photo_row() tuple~Project, Row~
+        +api_thumb() None
+        -_query() dict
+        -_send_file(path: Path, content_type: str) None
+    }
+
+    class PhotoQueryService {
+        <<class  cullumi/photo_query_service.py (既有, 不改)>>
+        +photo_payload(project_id, row, profile, variant_extensions) dict
+        -thumb_url = "/api/thumb?project_id=..&id=..&token=..&v=.."
+    }
+
+    class ProjectStore {
+        <<module  cullumi/project_store.py (既有, 不改)>>
+        +project_thumbnail_path(project: Project, stored_path) Path
+    }
+
+    class Project {
+        +Path thumb_dir
+        +Path root
+        +Path db_path
+    }
+
+    class CardView {
+        <<module  web/js/gallery.js (既有, 修改)>>
+        +int CARD_COLUMN = 215
+        +int CARD_BORDER = 1
+        +int CARD_THUMB_BOX = CARD_COLUMN - 2 * CARD_BORDER
+        +cardThumbUrl(base: string, boxCss: int) string
+        +photoCard(p, index, customBadge, customKind, extraInfo, thumbBoxCss) string
+        +loadLibraryPage(reset: bool) void
+        +renderPhotos(items, total) void
+    }
+
+    class GalleryCss {
+        <<module  web/css/base.css (既有, 修改)>>
+        +.gallery grid-template-columns: repeat(auto-fill, 215px)
+        +.gallery justify-content: space-between
+    }
+
+    class SimilarCss {
+        <<module  web/css/workspace.css (既有, 修改守卫)>>
+        +.similar-detail-gallery justify-content: start
+    }
+
+    class Thumbnail512 {
+        <<磁盘资产  只读, 绝不改写>>
+        +int long_edge = 512
+        +str analysis_version = "rgb512-v1" / "raw-preview512-v2"
+        +输入 NIQE / sharpness 指标
+    }
+
+    class CardAsset {
+        <<磁盘资产  新增, 可安全清理>>
+        +str name = "<stem>.card-<w>-<fingerprint>.jpg"
+        +int width = w
+    }
+
+    Handler --> DisplayAsset : ensure_display_asset(thumbnail, w)
+    Handler --> ProjectStore : project_thumbnail_path(project, row.thumbnail)
+    ProjectStore --> Project : project.thumb_dir
+    DisplayAsset ..> Thumbnail512 : Image.open() 只读派生
+    DisplayAsset --> CardAsset : 原子写入 + 旧指纹清理
+    CardView ..> Handler : GET /api/thumb?...&w=round(box*DPR)
+    CardView --> GalleryCss : CARD_THUMB_BOX 对齐列宽-边框
+    CardView ..> SimilarCss : 库外网格保持原样(不传 w)
+    PhotoQueryService --> CardView : photo_payload().thumb_url

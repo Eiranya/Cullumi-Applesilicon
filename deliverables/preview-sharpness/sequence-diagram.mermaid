@@ -1,0 +1,45 @@
+sequenceDiagram
+    autonumber
+    participant G as gallery.js<br/>photoCard()/cardThumbUrl()
+    participant W as WebKit/WKWebView
+    participant H as http_api.Handler<br/>api_thumb()
+    participant Q as _photo_row()/project_store
+    participant A as display_asset<br/>(新增模块)
+    participant FS as 磁盘 thumbs/
+
+    Note over G: 渲染库卡片（唯一入口）
+    G->>G: box = CARD_THUMB_BOX (=213)
+    G->>G: w = Math.round(box * devicePixelRatio)  // 1→213, 2→426
+    G-->>W: <img loading=lazy src=p.thumb_url + "&w=" + w>
+
+    W->>H: GET /api/thumb?project_id=..&id=..&token=..&v=..&w=213
+    H->>H: _authorized() 校验 token
+    H->>Q: _photo_row()
+    Q-->>H: (project, row)  row["thumbnail"]
+    H->>Q: project_thumbnail_path(project, row["thumbnail"])
+    Q-->>H: thumbnail = thumbs/<sha1>.jpg  (512 分析缩略图)
+
+    alt 未带 w（旧链接 / 项目封面）
+        H->>FS: _send_file(thumbnail, "image/jpeg")
+    else w 非法（非整数 / 越界）
+        H-->>W: 400 {"error": "w 超出允许范围"}
+    else w 合法
+        H->>A: ensure_display_asset(thumbnail, 213)
+        A->>A: 加锁 + display_asset_path()
+        Note over A: fingerprint = sha1(size:mtime_ns:w)[:12]
+        alt 缓存命中
+            A->>FS: target 已存在 → 直接返回
+        else 缓存缺失
+            A->>FS: Image.open(thumbnail).load()  # 只读
+            A->>A: resize((w, round(h*w/W)), LANCZOS) → JPEG q90
+            A->>FS: 写 .tmp 后 replace() 原子落盘
+            A->>FS: 清理同 <stem>.card-<w>-* 旧指纹文件
+        end
+        A-->>H: target
+        H->>FS: _send_file(target, "image/jpeg")
+        Note over H: Cache-Control: private, max-age=3600
+    end
+
+    FS-->>W: 213x142 JPEG（精确等于显示框）
+    W-->>G: 加载完成
+    G->>W: 断言 naturalWidth(213) == round(clientWidth(213) * DPR(1))  # A1

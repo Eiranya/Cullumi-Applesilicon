@@ -643,3 +643,39 @@ body:not(.project-open) .icon-button {
     grid-template-columns:1fr;
   }
 }
+
+/* Drag-and-drop affordance for the empty state.
+   .home is position:relative with overflow:hidden, so absolutely positioned
+   pseudo-elements are clipped to the view -- no extra markup is needed in
+   index.html. The frame and the label are split across ::before/::after
+   because the label must not sit directly on the hero photo: pink text over a
+   pink-toned image is close to unreadable, so it gets a solid pill. */
+.home.drop-active::before {
+  content:"";
+  position:absolute;
+  inset:14px;
+  border:3px dashed var(--pink);
+  border-radius:18px;
+  background:color-mix(in srgb,var(--pink) 8%,transparent);
+  pointer-events:none;
+  z-index:29;
+}
+
+.home.drop-active::after {
+  content:"松开即打开这个文件夹";
+  position:absolute;
+  top:26px;
+  left:50%;
+  transform:translateX(-50%);
+  padding:9px 22px;
+  border-radius:999px;
+  background:var(--pink);
+  color:#fff;
+  font-size:15px;
+  font-weight:600;
+  letter-spacing:.02em;
+  white-space:nowrap;
+  box-shadow:var(--shadow);
+  pointer-events:none;
+  z-index:30;
+}

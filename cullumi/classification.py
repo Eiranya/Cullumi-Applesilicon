@@ -197,17 +197,23 @@ def classify(row: sqlite3.Row | dict[str, Any], profile: dict[str, Any], percent
         flag("file_size", size_kb < q["min_size_kb_remove"], True, "文件异常小")
         flag("file_size", q["min_size_kb_remove"] <= size_kb < q["min_size_kb_review"], False, "文件较小")
     niqe = valid_niqe(row) if enabled.get("niqe", True) else None
+    # These two reasons are shown to the user next to every flagged photo. The
+    # other fourteen describe the visible symptom ("画面偏软", "细节偏少"); these
+    # used to name the metric instead ("NIQE 偏高"), which is unreadable unless
+    # you know the algorithm -- and NIQE runs the opposite way to intuition, so
+    # "偏高" reads as praise when it actually means poor quality. Named after
+    # what it measures, matching its neighbours.
     flag(
         "niqe",
         niqe is not None and niqe >= q["niqe_remove"],
         True,
-        "NIQE 严重偏高",
+        "画质较差",
     )
     flag(
         "niqe",
         niqe is not None and q["niqe_review"] <= niqe < q["niqe_remove"],
         False,
-        "NIQE 偏高",
+        "画质偏差",
     )
     match_all = q.get("match_mode") == "all"
     if reasons_remove and (not match_all or len(reasons_remove) >= 2):

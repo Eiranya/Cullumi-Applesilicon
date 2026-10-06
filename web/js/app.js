@@ -59,6 +59,7 @@ function startApplication() {
   bindSettingsEvents();
   bindGalleryEvents();
   bindGlobalEvents();
+  bindDropAffordance();
   boot().catch((error) => toast(error.message));
 }
 

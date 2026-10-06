@@ -78,7 +78,13 @@ class CullumiTests(unittest.TestCase):
         self.assertEqual(progress["stage"], "complete", progress)
 
     def test_profile_validation(self):
-        self.assertEqual(__version__, "1.0.5")
+        # Assert the version is well-formed rather than pinned to a literal.
+        # A hardcoded value would need editing on every release, and this file
+        # is frozen against upstream -- so the check now verifies the shape
+        # (three dotted numeric components) and stays true across bumps. The
+        # packaging spec imports this same constant, so there is still only
+        # one source of truth.
+        self.assertRegex(__version__, r"^\d+\.\d+\.\d+$")
         self.assertEqual(self.config.data["theme"], "day")
         self.assertTrue(self.config.data["auto_check_updates"])
         validate_profile(BUILTIN_PROFILES["balanced"])

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -13,6 +14,23 @@ from typing import Any, Callable
 RELEASES_API_URL = "https://api.github.com/repos/Yuumi0221/Cullumi/releases/latest"
 RELEASES_PAGE_URL = "https://github.com/Yuumi0221/Cullumi/releases"
 _VERSION_PATTERN = re.compile(r"(?<!\d)(\d+)(?:\.(\d+))?(?:\.(\d+))?")
+
+# Release packaging differs per platform. macOS ships a disk image (or a plain
+# archive for portable builds) while Windows ships an MSI or a portable zip.
+# Scores express "how likely is this the primary installer for this platform".
+if sys.platform == "darwin":
+    ASSET_SUFFIX_SCORES = {".dmg": 30, ".zip": 20, ".tar.gz": 10}
+    ASSET_PLATFORM_HINTS = (
+        "macos", "mac", "osx", "apple", "silicon", "arm64", "苹果", "mac版",
+    )
+else:
+    ASSET_SUFFIX_SCORES = {".zip": 30, ".exe": 20, ".msi": 10}
+    ASSET_PLATFORM_HINTS = ("windows", "win64", "win-x64", "portable", "便携")
+
+
+def platform_name() -> str:
+    """Return the user-facing name of the platform this build targets."""
+    return "macOS" if sys.platform == "darwin" else "Windows"
 
 
 def version_key(value: str) -> tuple[int, int, int]:
@@ -34,18 +52,29 @@ def _request(url: str, current_version: str = "") -> urllib.request.Request:
 
 
 def select_release_asset(assets: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Pick the release archive that best matches the running platform.
+
+    Source bundles and debug symbol archives are always rejected. The suffix
+    allow-list and the platform keyword bonus come from the module-level
+    tables so Windows keeps preferring ``.zip``/``.exe``/``.msi`` while macOS
+    prefers ``.dmg``.
+    """
     candidates: list[tuple[int, dict[str, Any]]] = []
     for asset in assets:
         name = str(asset.get("name") or "")
         url = str(asset.get("browser_download_url") or "")
         lowered = name.casefold()
         suffix = Path(name).suffix.casefold()
-        if not url or suffix not in {".zip", ".exe", ".msi"}:
+        # ".tar.gz" is the only two-part suffix we accept; Path.suffix would
+        # report just ".gz" for it, so recognise the compound form explicitly.
+        if lowered.endswith(".tar.gz"):
+            suffix = ".tar.gz"
+        if not url or suffix not in ASSET_SUFFIX_SCORES:
             continue
         if any(word in lowered for word in ("source", "源码", "symbols", "debug")):
             continue
-        score = {".zip": 30, ".exe": 20, ".msi": 10}[suffix]
-        if any(word in lowered for word in ("windows", "win64", "win-x64", "portable", "便携")):
+        score = ASSET_SUFFIX_SCORES[suffix]
+        if any(word in lowered for word in ASSET_PLATFORM_HINTS):
             score += 50
         if "cullumi" in lowered:
             score += 30
@@ -71,6 +100,7 @@ def check_for_update(
                 "release_url": RELEASES_PAGE_URL,
                 "release_notes": "",
                 "no_release": True,
+                "platform": platform_name(),
             }
         raise RuntimeError(f"GitHub 返回错误状态 {error.code}") from error
     except (urllib.error.URLError, TimeoutError, OSError) as error:
@@ -96,10 +126,18 @@ def check_for_update(
         "asset_name": str(asset.get("name") or "") if asset else "",
         "download_url": str(asset.get("browser_download_url") or "") if asset else "",
         "no_release": False,
+        # Lets the UI name the platform it is actually running on instead of
+        # hardcoding "Windows" in the no-matching-asset message.
+        "platform": platform_name(),
     }
 
 
 def downloads_directory() -> Path:
+    """Return the user's Downloads folder, honouring the Windows known-folder path.
+
+    macOS has no equivalent registry key, so it always resolves to
+    ``~/Downloads`` via the fallback below.
+    """
     if os.name == "nt":
         try:
             import winreg

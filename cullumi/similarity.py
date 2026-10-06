@@ -40,6 +40,17 @@ SIMILARITY_TOPOLOGY_COLUMNS = (
     "blink_closed_ratio",
 )
 
+# Processing status of a similarity group. Values rather than an enum because
+# they travel to the web layer as JSON verbatim; the UI maps them to labels.
+GROUP_STATUS_UNTOUCHED = "untouched"
+GROUP_STATUS_PARTIAL = "partial"
+GROUP_STATUS_DONE = "done"
+GROUP_STATUS_VALUES = (
+    GROUP_STATUS_UNTOUCHED,
+    GROUP_STATUS_PARTIAL,
+    GROUP_STATUS_DONE,
+)
+
 # Keep the edge table as the outer loop.  Without CROSS JOIN, SQLite can
 # choose the status/error index on both photo aliases first, producing an
 # O(active_photos²) nested loop before probing similar_pairs.
@@ -457,6 +468,47 @@ def _hydrate_similarity_groups(
     return hydrated
 
 
+def member_decisions_by_id(conn: sqlite3.Connection) -> dict[int, str]:
+    """Decisions for every photo that takes part in a similarity pair.
+
+    Scoped to pair endpoints rather than the whole library so the cost follows
+    the number of grouped photos, which stays well below the library size.
+    """
+    return {
+        int(row["id"]): str(row["decision"] or "")
+        for row in conn.execute(
+            """SELECT p.id, p.decision FROM photos p
+               WHERE p.status='active' AND p.error=''
+                 AND p.id IN (SELECT a_id FROM similar_pairs
+                              UNION SELECT b_id FROM similar_pairs)"""
+        )
+    }
+
+
+def group_processing_summary(decisions: Iterable[str]) -> dict[str, Any]:
+    """Summarise how far a similarity group has been worked through.
+
+    Derived from the members' own decisions rather than stored on the group.
+    A group is itself computed from the pair graph, so a persisted copy could
+    contradict the photos it describes as soon as a rescan reshapes the
+    membership; the decisions are the single source of truth, and recomputing
+    here costs nothing because hydration already loads every member row.
+
+    An empty group reports `untouched`, never `done`, so a group that lost all
+    of its members can never appear finished.
+    """
+    values = [str(value or "") for value in decisions]
+    total = len(values)
+    decided = sum(1 for value in values if value)
+    if total == 0 or decided == 0:
+        status = GROUP_STATUS_UNTOUCHED
+    elif decided == total:
+        status = GROUP_STATUS_DONE
+    else:
+        status = GROUP_STATUS_PARTIAL
+    return {"status": status, "decided": decided, "total": total}
+
+
 def _hydrate_similarity_batch(
     conn: sqlite3.Connection,
     groups: list[dict[str, Any]],
@@ -606,6 +658,7 @@ class SimilarityGroupCache:
         offset: int = 0,
         limit: int | None = None,
         participant_ids: set[int] | None = None,
+        status: str | None = None,
     ) -> tuple[int, list[dict[str, Any]]]:
         topology = self._topology(
             project_id, conn, profile, blink_detection_enabled
@@ -619,6 +672,20 @@ class SimilarityGroupCache:
                 if participant_ids.intersection(group["member_ids"])
             ]
         )
+        if status is not None:
+            # Filtered before the offset/limit slice, exactly like the search
+            # pre-filter above: paginating first would drop the groups the user
+            # asked for and pad the page with ones they did not.
+            decisions = member_decisions_by_id(conn)
+            selected = [
+                group
+                for group in selected
+                if group_processing_summary(
+                    decisions.get(photo_id, "")
+                    for photo_id in group["member_ids"]
+                )["status"]
+                == status
+            ]
         total = len(selected)
         stop = None if limit is None else offset + limit
         return total, self._hydrate(conn, selected[offset:stop])
@@ -660,15 +727,21 @@ class SimilarityGroupCache:
 
 
 __all__ = [
+    "GROUP_STATUS_DONE",
+    "GROUP_STATUS_PARTIAL",
+    "GROUP_STATUS_UNTOUCHED",
+    "GROUP_STATUS_VALUES",
     "SimilarityGroupCache",
     "_structure_similarity",
     "_structure_vector",
     "build_similarity_groups",
     "blink_recommendation_key",
     "filename_sequence",
+    "group_processing_summary",
     "hamming",
     "hamming_candidate_pairs",
     "image_structure",
+    "member_decisions_by_id",
     "parse_taken",
     "photo_shooting_key",
     "quality_score",

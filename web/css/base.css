@@ -410,7 +410,10 @@ nav button.active em {
 
 .gallery {
   display:grid;
-  grid-template-columns:repeat(auto-fill,minmax(210px,1fr));
+  /* 固定列宽 215px → 卡片图片框 215-2*1px(border, box-sizing:border-box)=213 CSS px，
+     与 web/js/gallery.js 的 CARD_THUMB_BOX 一一对应；余量由 space-between 吸收。 */
+  grid-template-columns:repeat(auto-fill,215px);
+  justify-content:space-between;
   gap:14px;
   padding-right:40px;
   padding-left:40px;
@@ -623,7 +626,9 @@ nav button.active em {
 }
 
 .gallery {
-  grid-template-columns:repeat(auto-fill,minmax(170px,1fr))
+  /* 窄窗同样确定化：保持与主规则一致的固定列宽，避免退回可变列宽破坏供给匹配
+     （justify-content 由主规则继承，无需在此重复）。 */
+  grid-template-columns:repeat(auto-fill,215px)
 }
 
 .form-grid {

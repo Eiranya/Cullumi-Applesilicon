@@ -94,6 +94,8 @@ async function boot() {
   $("#confirmAcceptSuggestions").checked =
     b.settings.confirm_accept_suggestions !== false;
   $("#fastAnalysis").checked = !!b.settings.fast_analysis;
+  $("#blinkGpu").checked = b.settings.blink_gpu_enabled !== false;
+  renderBlinkGpuStatus($("#blinkGpu").checked, b.settings.blink_gpu_active !== false);
   $("#syncVariantDecisions").checked =
     b.settings.sync_variant_decisions !== false;
   $("#autoCheckUpdates").checked = !!b.settings.auto_check_updates;
@@ -153,6 +155,7 @@ async function showProject(p) {
     selectedId: "",
     mode: "closed",
     listSearch: "",
+    statusFilter: "all",
     memberSearch: "",
     detail: null,
     formatCategories: [],
@@ -224,7 +227,7 @@ async function startRequiredAnalysis() {
   const blink = state.project.blink_rescan_required;
   const preprocessing = state.project.preprocessing_rescan_required;
   if (!niqe && !blink && !preprocessing) return;
-  const label = preprocessing ? "照片质量" : niqe && blink ? "NIQE 与眨眼" : niqe ? "NIQE" : "眨眼";
+  const label = preprocessing ? "照片质量" : niqe && blink ? "画质与眨眼" : niqe ? "画质" : "眨眼";
   toast(`正在补充${label}分析，已有人工决定将保留`);
   await startScan();
 }
@@ -329,3 +332,74 @@ function bindSessionEvents() {
     .querySelector("main")
     .addEventListener("scroll", closeRecentMenu, { passive: true });
 }
+
+// ---------------------------------------------------------------------------
+// Drag-and-drop folder opening
+// ---------------------------------------------------------------------------
+// The real filesystem path can only come from Python: a browser exposes just
+// the bare file name, and pywebview's macOS backend reads the path off the
+// pasteboard only when a drop listener is registered through its DOM API (see
+// the drop wiring in app.py). So paths arrive via cullumiAcceptDrop below,
+// while the highlight is plain CSS driven from here.
+const DROP_ACTIVE_CLASS = "drop-active";
+let dragDepth = 0;
+
+function setDropActive(active) {
+  const home = $("#home");
+  if (!home) return;
+  // Only advertise the affordance where it is honoured. With a project open
+  // the home view is display:none anyway, so this would never be visible.
+  home.classList.toggle(DROP_ACTIVE_CLASS, Boolean(active) && !state.project);
+}
+
+function bindDropAffordance() {
+  const swallow = (event) => {
+    // Without this WKWebView tries to navigate to the dropped file.
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  // dragenter/dragleave fire once per element crossed, so a depth counter is
+  // needed -- a naive toggle flickers as the pointer moves over children.
+  window.addEventListener("dragenter", (event) => {
+    if (!event.dataTransfer) return;
+    swallow(event);
+    dragDepth += 1;
+    setDropActive(true);
+  });
+  window.addEventListener("dragover", (event) => {
+    if (!event.dataTransfer) return;
+    swallow(event);
+  });
+  window.addEventListener("dragleave", (event) => {
+    swallow(event);
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) setDropActive(false);
+  });
+  window.addEventListener("drop", (event) => {
+    swallow(event);
+    dragDepth = 0;
+    setDropActive(false);
+  });
+}
+
+// Called from app.py once it has a real, normalised folder path.
+window.cullumiAcceptDrop = async function (root) {
+  setDropActive(false);
+  if (state.project) {
+    toast("请先返回首页，再拖入新的文件夹");
+    return;
+  }
+  try {
+    const project = await json("/api/project/open", { root });
+    await showProject(project);
+    await startScan();
+  } catch (error) {
+    toast(`打开文件夹失败：${error.message}`);
+  }
+};
+
+// Called from app.py when the drop was not a usable folder.
+window.cullumiRejectDrop = function (reason) {
+  setDropActive(false);
+  toast(reason === "missing" ? "无法读取拖入文件夹的路径" : "只支持拖入文件夹");
+};

@@ -1,129 +1,197 @@
-# Cullumi
+# Cullumi for macOS
 
-Cullumi 是一款仅在本机运行的 Windows 照片筛选应用。它会递归扫描照片目录，生成不裁切的缩略图，检查画质，寻找完全重复照片和相似连拍，最后由用户决定保留或隔离哪些照片。
+Cullumi 是一款**仅在本机运行**的照片筛选应用。它递归扫描照片目录，生成不裁切的缩略图，检查画质，找出完全重复照片和相似连拍，最后由你决定保留或隔离哪些照片。自动分析只评估技术指标，所有决定仍由你确认。
 
-当前版本：v1.0.5
+当前版本：**v1.0.6**（arm64 / macOS 14+）
+
+>本仓库是 [Yuumi0221/Cullumi](https://github.com/Yuumi0221/Cullumi) 的 macOS 移植版，功能与界面与上游保持一致，并加入 Apple Silicon 硬件加速与若干 macOS 适配。移植范围与差异见 [`MACOS-使用说明.md`](MACOS-使用说明.md)。
+
+---
+
+## 功能
+
+- **不裁切缩略图与卡片预览** —— 按显示框的实际设备像素供图，浏览器不再二次缩放
+- **画质分析** —— 清晰度、曝光、对比度、暗/亮部剪切、亮度分布与感知哈希
+- **完全重复检测** —— 按内容哈希跨目录识别字节级重复
+- **相似连拍分组** —— 感知哈希 + 结构相似度，含时间邻近与文件序号邻近判定
+- **RAW/JPEG 拍摄变体** —— 同一张曝光的多种格式关联为一个变体组，仍分别显示与管理
+- **眨眼检测** —— 人脸定位 + 眼部分类（CoreML 硬件加速）
+- **动态照片** —— iPhone Live Photo 与Android Motion Photo，支持改封面与保留声音缓存
+- **决策与隔离** —— 单张/批量决定、CSV 导入导出、隔离与历史恢复
+
+---
+
+## 系统要求
+
+| 项目 | 要求 |
+|---|---|
+| 操作系统 | **macOS 14（Sonoma）或更高版本** |
+| 处理器 | **Apple Silicon（arm64）**：M1 / M2 / M3 / M4 / M5 |
+| 磁盘空间 | 约 190 MB（应用包） |
+
+不支持 Intel Mac。最低版本来自 onnxruntime 只提供 `macosx_14_0_arm64` 轮子这一事实；该组件是眨眼检测所必需。**本项目未在 macOS 14 以下的机器上实测过拦截行为。**
+
+---
+
+## 安装与首次打开
+
+下载并解压 `.app` 后，**双击 `Cullumi.app`**。
+
+### 如果双击打不开（重要）
+
+本应用使用 **ad-hoc 签名**（本地自签名），**未经 Apple 公证**。没有开发者证书时 Gatekeeper 会拦截它，**这是预期行为，不代表文件损坏**。三种解除方式：
+
+```bash
+# 方式一：右键点开（最简单）
+# 在 Finder 中右键 Cullumi.app →「打开」→「打开」，此后不再询问
+
+# 方式二：移除隔离属性
+xattr -r -d com.apple.quarantine /Applications/Cullumi.app
+
+# 方式三：清除 Gatekeeper 记录（会忘记所有已放行应用，不建议）
+sudo spctl --master-disable
+```
+
+> **为什么用 ad-hoc 签名**：Apple 的公证需要付费的开发者证书。本项目没有证书，因此只能本地签名——代价是每台机器首次打开都需手动放行。
+
+---
 
 ## 使用
 
-便携包中双击 `Cullumi.exe`。首次打开后：
+1. **导入** —— 点击「从文件夹导入」选择照片目录。整个目录树会被递归扫描。
+2. **等待扫描** —— 照片发现、解码分析、重复确认、相似分组、眨眼检测依次进行。扫描可随时取消，再次扫描会复用未变化照片的结果。
+3. **筛选** —— 在「照片库」中组合决定状态、分析结果与格式筛选，可按建议、名称、大小或拍摄日期排序；相似连拍可按组采纳。**相似组可按处理状态筛选（已处理／未处理／部分处理）。**
+4. **查看** —— 点击照片放大。快捷键：`W/↑` 保留、`S/↓` 移除、`A/←` 上一张、`D/→` 下一张。动态照片显示 `LIVE` 标识，可播放、拖动时间轴、选择封面。
+5. **隔离** —— 点击「隔离已标记移除」并检查清单。确认后文件移入原目录下的 `_照片筛选隔离`，之后仍可从隔离历史恢复。
 
-1. 点击“从文件夹导入”并选择照片目录。
-2. 等待照片发现、解码分析、重复确认、相似分组和眨眼检测完成。扫描可以取消，再次扫描时会复用未变化照片的结果。
-3. 在“照片库”的“查看”菜单中组合决定状态、分析结果与照片格式筛选，并可按建议、名称、大小或拍摄日期递增/递减排序；也可以从“智能建议、待决定、已保留、已移除”进入对应照片。“一键采纳”会按当前页面与设置批量标记尚未决定的照片，不会立即移动文件；相似连拍可按组采纳推荐保留与可考虑移除的照片。
-4. 点击照片可以放大查看。使用 `W/↑` 保留、`S/↓` 移除、`A/←` 查看上一张、`D/→` 查看下一张。动态照片会显示 `LIVE` 标识，放大后可以播放、拖动时间轴、选择封面，并根据新封面重新分析照片质量。
-5. 点击“隔离已标记移除”并检查完整清单。确认后，相关文件会移入原照片目录下的 `_照片筛选隔离`，之后仍可从隔离历史恢复。
+### 数据存放位置
 
-Cullumi 只监听 `127.0.0.1`，接口使用每次启动随机生成的会话令牌。没有 WebView2 时，Cullumi 会改用默认浏览器打开界面。
+| 内容 | 路径 |
+|---|---|
+| 配置、项目数据库、缩略图、预览缓存、日志 | `~/Library/Application Support/Cullumi/` |
+| 隔离文件 | 原照片目录下的 `_照片筛选隔离/` |
 
-## 支持格式与使用限制
+**项目数据库与缓存删除后，决定与隔离历史会一并丢失。** 需要保留时请勿直接删除该目录。
+
+---
+
+## 网络与隐私
+
+- 只监听 `127.0.0.1`，接口使用每次启动随机生成的会话令牌
+- **不收集、不上传任何数据**，照片处理全部在本机完成
+- 仅「检查更新」访问 GitHub API（`api.github.com`），其余功能不联网
+- 若 WKWebView 无法启动，会自动改用系统浏览器，原因记录在 `~/Library/Application Support/Cullumi/webview-error.log`
+
+---
+
+## 支持格式与限制
 
 ### 图片格式
 
-- 常见图片支持 JPG、JPEG、PNG、WebP、TIFF、TIF 和 BMP。
-- HEIC、HEIF、HEICS、HEIFS 与 HIF 由 pillow-heif 解码。
-- RAW 支持 DNG、CR2、CR3、NEF、ARW、RAF、ORF、RW2 与 PEF，由 rawpy 和 LibRaw 解码。
-- RAW 的拍摄时间从文件自身的 TIFF 结构读取（Pillow 无法从 RAW 读到 EXIF），用于拍摄变体配对与连拍分组的时间邻近判定。若文件未记录拍摄时间，会依次退回文件修改时间、文件名主干。
-- 同名、且拍摄时间一致（相差 5 秒内）的 RAW 与非 RAW 图片会作为拍摄变体关联，**两者可以位于不同目录**——例如 RAW 放在 `raw/` 子目录、JPEG 放在项目根目录。同名但拍摄时间相差较大的（例如不同活动的同号文件）不会关联。仍分别显示和管理。
-- 视觉相似度只使用其中一个代表文件，相似组展开时会同时显示代表照片的关联格式；字节级完全重复仍检查所有文件。
-- “相同照片同时决定”默认开启，手动保留、移除或清除决定时会同步关联格式；照片卡片和查看器会显示关联格式。该设置可以随时关闭，已有冲突决定不会被自动改写。
-- RAW、HEIC、HEIF 与 TIFF 首次放大时会生成最长边不超过 2560 像素的 JPEG 预览缓存，原文件不会因此改写。
-- 普通视频不会单独加入照片库，只会在组成受支持的动态照片时使用。
+| 类型 | 扩展名 | 解码器 |
+|---|---|---|
+| 常见图片 | JPG、JPEG、PNG、WebP、TIFF、TIF、BMP | Pillow |
+| HEIF 系| HEIC、HEIC、HEIF、HEICS、HEIFS、HIF | pillow-heif |
+| RAW | DNG、CR2、CR3、NEF、ARW、RAF、ORF、RW2、PEF | rawpy / LibRaw |
 
-> **升级提示**：加入 RAW 拍摄时间读取后，RAW 的分析缓存版本会从 `raw-preview512-v2` 升到 `raw-preview512-v3`。首次扫描时应用会提示“需要重新扫描”，届时请执行一次扫描以补齐 RAW 的拍摄时间；否则跨目录的 RAW/JPEG 配对不会生效。扫描期间读取 RAW 只需要读取文件头，不会解码整张图片。
+**RAW/JPEG 拍摄变体配对规则**：
+
+- RAW 的拍摄时间从文件自身的 **TIFF 结构**读取（Pillow 读不到 RAW 的 EXIF），先找 `DateTimeOriginal` 再退回 `DateTime`
+- 同名、且拍摄时间一致（**相差 5 秒内**）的 RAW 与非 RAW 图片关联为一个变体组，**两者可以位于不同目录**——例如 RAW 在 `raw/` 子目录、JPEG 在项目根目录
+- 同名但拍摄时间相差较大的（例如不同活动的同号文件）**不会**关联
+- 判定分三级回退：EXIF 拍摄时间 → 文件修改时间 → 文件名主干。**时间冲突即拒绝配对**——配错会丢RAW 文件，漏配只是多显示一张缩略图
+- 视觉相似度只使用组内一个代表文件；字节级完全重复仍检查所有文件
+
+### 已知限制
+
+| 限制 | 说明 |
+|---|---|
+| **RAW 配对需重扫一次** | 本版起 RAW 分析缓存版本由 `raw-preview512-v2` 升至 `v3`。首次扫描会提示「需要重新扫描」，须执行一次以补齐 RAW 拍摄时间，否则跨目录配对不生效。扫描只读文件头，不解码整张图片 |
+| **非整数缩放无法像素级1:1** | 显示倍率DPR 为 1.5 这类小数时，图片框尺寸为小数，无法恰好整数倍供图，浏览器仍会做极轻微缩放 |
+| **竖构图高DPR 下预览偏大** | 竖构图在 DPR=2 时预览字节比横构图多约 150%（按元素宽度过供，属预期行为） |
+| **RAW 连拍召回率依赖 EXIF** | RAW 文件若无拍摄时间，相似连拍的时间邻近判定会退化为文件序号判定 |
+| **模型目录** | `models/` 下的眨眼检测与 NIQE 模型已随包分发，**不支持替换为自定义模型** |
+| **macOS 14 未实测** | 最低版本限制来自 onnxruntime 轮子可用性，未在真实旧系统上验证过拦截行为 |
+| **ad-hoc 签名** | 每台机器首次打开都需手动放行，见上文「安装与首次打开」 |
 
 ### 动态照片
 
-- iPhone Live Photo 支持同一目录中同名的 HEIC、HEIF 或 JPEG 与 MOV 配对。
-- Android Motion Photo 支持带标准 Motion Photo XMP 的 JPEG 内嵌视频。
-- 动态部分首次播放时会生成保留声音的 WebM 缓存，因此项目缓存会占用额外空间。
-- 照片与配对 MOV 会作为同一项处理，隔离和恢复时不会拆开。
-- 设置中可以选择不修改原图、每次修改前提醒或始终修改原图。原图封面修改支持 JPEG、HEIC 与 HEIF 动态照片，修改前会在项目缓存的 `source-backups` 目录保留备份。配对或内嵌的视频内容不会重新编码。
-- 动态视频帧的分辨率可能低于原始静态照片。将视频帧写入原图后，静态图片会采用该帧的分辨率。
+- iPhone Live Photo 支持同一目录中同名的 HEIC/HEIF/JPEG 与 MOV 配对
+- Android Motion Photo 支持带标准 Motion Photo XMP 的 JPEG 内嵌视频
+- 动态部分首次播放生成保留声音的 WebM 缓存，占用额外空间
+- 可选择不修改原图／每次修改前提醒／始终修改原图；修改前在项目缓存的 `source-backups` 保留备份
+- **将视频帧写入原图后，静态图片会采用该帧的分辨率**，可能低于原始照片
 
 ### 分析范围
 
-- 自动分析会检查清晰度、曝光、对比度等技术指标，不会判断构图、表情偏好或照片的纪念价值。所有决定仍由用户确认。
-- 眨眼检测只处理非完全重复的相似连拍候选，只会调整组内推荐顺序，不会自动标记照片为移除。
-- 小脸、侧脸、遮挡和低光照片可能无法可靠判断。只有非推荐照片中可靠检测到闭眼时才会显示“眨眼”，其余情况不显示状态。
-- 关闭后重新启用眨眼检测不会自动开始扫描。现有结果失效时，设置页会显示“需要重新扫描”。
+自动分析检查清晰度、曝光、对比度等技术指标，**不判断构图、表情偏好或照片的纪念价值**。小脸、侧脸、遮挡与低光照片可能无法可靠判断；只有非推荐照片中可靠检测到闭眼时才显示「眨眼」。关闭后重新启用眨眼检测不会自动开始扫描。
 
-## 文件与缓存
+---
 
-- 项目数据库、缩略图、高清预览和动态视频缓存保存在项目缓存目录。需要保留决定和隔离历史时，不要直接删除该目录。
-- 更换项目存储位置时，Cullumi 会先复制并校验数据库，成功后才切换到新位置。旧缓存由用户确认后清理。
-- 配置或旧项目数据库需要修复和升级时，Cullumi 会先保留备份。发生恢复时，启动界面会给出提示。
-- 隔离操作始终需要确认。隔离文件保存在原照片目录中，不会放入项目缓存。
+## 目录结构
 
-## 开发与测试
-
-项目需要 Python 3.12 及以上版本。`requirements.txt` 只列直接运行依赖，`requirements.lock` 固定 Windows 运行环境的完整依赖树；`requirements-dev.txt` 和 `requirements-build.txt` 分别补充开发检查与便携构建依赖。
-
-主要代码按下面的职责拆分。
-
-- `cullumi/config.py` 负责Cullumi 配置、模式定义和参数校验。
-- `cullumi/classification.py` 负责照片筛选条件、项目统计和画质分类。
-- `cullumi/capture_variants.py` 负责 RAW/非 RAW 拍摄变体分组、代表选择、格式分类和同步目标查询。
-- `cullumi/scanner.py` 协调快速照片发现、增量分析、完全重复确认、相似关系与眨眼分析。
-- `cullumi/analysis_worker.py` 在受限的独立进程中执行扫描期图片解码，负责超时、取消与异常恢复。
-- `cullumi/analysis_refresh.py` 根据配置或单张照片的变化决定需要刷新的分析阶段。
-- `cullumi/project_store.py` 负责项目模型、SQLite 连接与迁移、缓存路径和写入一致性。
-- `cullumi/media.py` 负责图片解码、缩略图、高清预览、图像指标与感知哈希。
-- `cullumi/face_analysis.py` 负责人脸定位、眼部分类、多人聚合和模型缓存指纹。
-- `cullumi/motion.py` 负责动态照片探测、视频缓存、帧提取和原图封面底层处理。
-- `cullumi/motion_cover_service.py` 负责动态封面更新及相关数据库事务。
-- `cullumi/photo_query_service.py` 负责照片列表、相似组查询和接口数据整理。
-- `cullumi/settings_service.py` 负责设置保存、模式应用和分析刷新事务。
-- `cullumi/decision_service.py` 负责单张与批量决定、CSV 导入导出和拍摄变体同步。
-- `cullumi/quarantine_service.py` 负责隔离清单、文件移动回滚与恢复。
-- `cullumi/workflows.py` 保留旧版决定和隔离导入入口的兼容导出。
-- `cullumi/similarity.py` 负责相似候选索引、结构比较、分组和推荐排序。
-- `cullumi/fs_utils.py` 提供路径边界判断与原子 JSON 写入。
-- `cullumi/core.py` 保留旧版 Python 导入入口的兼容导出。
-- `web/js/runtime.js` 提供共享状态、接口请求、提示与主题功能。
-- `web/js/gallery-tools.js` 生成照片库与相似组共用的查看、排序组件。
-- `web/js/session.js` 负责最近项目、项目打开和扫描进度。
-- `web/js/similar.js` 负责相似照片列表与分组浏览。
-- `web/js/settings.js` 负责模式、设置、确认框和更新提示。
-- `web/js/gallery.js` 负责图库分页、筛选、照片卡片和决定同步。
-- `web/js/viewer.js` 负责图片预览、缩放和 Live Photo 控制。
-- `web/js/app.js` 负责统一初始化和全局快捷键。
-
-前端使用无需构建工具的经典脚本。脚本依次加载 `runtime`、`gallery-tools`、`session`、`similar`、`settings`、`gallery`、`viewer` 和 `app`。样式依次加载 `base`、`workspace`、`viewer`、`settings`、`theme`、`responsive` 和 `home`。静态资源 URL 使用内容修订号统一刷新缓存。
-
-创建运行环境并启动Cullumi 。
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.lock
-.\.venv\Scripts\python.exe app.py
+```
+Cullumi-Applesilicon/
+├── app.py                    # 入口：配置日志、启动本地服务、创建 pywebview 窗口
+├── cullumi/                  # Python 后端（25 个模块）
+│   ├── media.py              #   解码、缩略图、指标、感知哈希、RAW EXIF 读取
+│   ├── capture_variants.py   #   RAW/JPEG 变体分组与代表选择
+│   ├── similarity.py         #   相似候选、结构比较、并查集分组
+│   ├── face_analysis.py      #   人脸定位、眼部分类（CoreML 加速）
+│   ├── scanner.py            #   发现、增量分析、重复确认、关系重建
+│   ├── project_store.py      #   SQLite 模型、迁移、缓存路径
+│   └── display_asset.py      #   卡片预览派生（按框×DPR 精确供图）
+├── web/                      # 前端（原生 JS/CSS，无构建工具）
+├── models/                   # 眨眼检测 + NIQE 模型（已随包分发）
+├── tests/                    # 单元测试
+├── evaluation/
+│   ├── preview-resolution/   #   卡片预览清晰度的测量工具与报告
+│   └── performance-results/  #   上述测量的输出（可再生成，不入版本控制）
+├── deliverables/             # 预览清晰度专题的 PRD 与架构设计
+├── docs/arch/                # 历史归档（移植计划、QA 报告、性能剖析）
+├── Cullumi-macos.spec        # PyInstaller 打包定义
+├── build-macos.sh            # 一龙构建：依赖 → 检查 → 打包
+├── setup-macos.sh            # 依赖安装
+├── verify-macos.sh           # ruff + 单元测试
+├── verify-change-set.sh      # 与上游差异门禁
+└── smoke-test-macos.sh       # 冒烟测试
 ```
 
-安装开发依赖并运行核心检查。
+---
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\verify.ps1
+## 从源码运行
+
+```bash
+# 1. 安装依赖（首次必做）
+./setup-macos.sh
+
+# 2. 启动
+CULLUMI_PYTHON=/path/to/python3 ./build-macos.sh   # 或直接 python app.py
 ```
 
-`verify.ps1` 默认运行 Ruff 和全部 Python 测试，眨眼模型及 NIQE 参数、许可证校验已包含在 Python 测试中。
+**Python 环境要求**：`numpy`、`Pillow`、`pillow-heif`、`rawpy`、`pywebview==6.1`、`onnxruntime`、`imageio-ffmpeg`，以及 PyObjC 系列（pywebview 在 macOS 上通过 WKWebView 使用它们）。完整列表见 `requirements-macos.txt`。
 
-如需额外运行浏览器交互和视觉检查，再安装 Node.js 20 及以上版本和 Microsoft Edge：
+> `pywebview` 依赖 `proxy_tools` 与 `bottle` 在**模块作用域**无条件 import，两者无法从 `requirements-macos.txt` 安装——`setup-macos.sh` 已用 `--no-deps` 分步处理，**请勿手工 `pip install -r requirements-macos.txt`**。
 
-```powershell
-npm ci
-.\verify.ps1 -Browser
+### 检查与打包
+
+```bash
+./verify-macos.sh     # ruff + 全量单元测试
+./build-macos.sh      # 依赖 → 检查 → 打包，产物在 dist/
 ```
 
-可选浏览器测试使用隔离的临时配置和模拟接口数据，失败产物会写入 `test-results\` 与 `playwright-report\`。也可以单独执行 `npm run test:dom`。
+### 差异门禁
 
-不少于 300 张、60 组授权连拍的真实眨眼评估流程见 `evaluation/README.md`。评估工具会输出逐人脸预测、精确率、召回率、组推荐成功率以及 P50 和 P95 性能报告。
-
-安装构建依赖并生成便携版。
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-build.txt
-.\build.ps1
+```bash
+./verify-change-set.sh
 ```
 
-构建结果位于 `dist\Cullumi-v1.0.5\`，同时生成 `dist\Cullumi-v1.0.5-Windows-Portable.zip`。
+本移植版必须能说清**每一处**与上游的差异。该脚本校验四件事：冻结目录（`tests/`、`models/`）逐字节一致、差异集合精确匹配、新增文件在白名单内、README 与上游一致。白名单项均附授权理由。
+
+> 相对上游，新增 `smoke-test-macos.sh`、`cullumi/display_asset.py`、`requirements-macos.txt`、`docs/arch/`、构建脚本与 spec；修改 `app.py`、10 个 `cullumi/` 模块、10 个 `web/` 资产、2 个测试文件。
+
+---
+
+## 许可
+
+本项目沿用上游仓库的许可条款。模型文件各有独立许可，见 `models/` 下各目录的 `LICENSE` 与 `README.md`。

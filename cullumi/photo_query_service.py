@@ -18,7 +18,12 @@ from .classification import (
 )
 from .config import ConfigStore, profile_blink_enabled
 from .project_store import ProjectManager, connect_db
-from .similarity import SimilarityGroupCache, quality_score
+from .similarity import (
+    GROUP_STATUS_VALUES,
+    SimilarityGroupCache,
+    group_processing_summary,
+    quality_score,
+)
 
 PHOTO_SORT_EXPRESSIONS = {
     "suggestion": """CASE suggestion
@@ -240,6 +245,10 @@ class PhotoQueryService:
             else min(SIMILAR_GROUP_PAGE_LIMIT, max(1, int(raw_limit)))
         )
         offset = max(0, int(query.get("offset", ["0"])[0]))
+        raw_status = (query.get("status", ["all"])[0] or "all").strip()
+        if raw_status != "all" and raw_status not in GROUP_STATUS_VALUES:
+            raise ValueError("无效的处理状态筛选")
+        status_filter = None if raw_status == "all" else raw_status
         project = self.manager.from_id(project_id)
         profile = self.config.get_profile(project.profile_id)
         blink_enabled = profile_blink_enabled(profile)
@@ -257,6 +266,7 @@ class PhotoQueryService:
                 offset=offset,
                 limit=limit,
                 participant_ids=participant_ids,
+                status=status_filter,
             )
             variant_rows = active_variant_rows(
                 conn,
@@ -270,11 +280,19 @@ class PhotoQueryService:
         items = []
         for group in groups:
             expanded = expanded_similarity_members(group, variant_rows)
+            # Derived from every member, including capture variants: the status
+            # has to describe the same set the UI counts, or a RAW+JPEG pair
+            # would leave a group permanently "partial".
+            summary = group_processing_summary(
+                str(member_row["decision"] or "") for member_row, _ in expanded
+            )
             items.append({
                 "id": group["id"],
                 "count": len(expanded),
                 "capture_count": len(group["members"]),
                 "kind": group["kind"],
+                "status": summary["status"],
+                "decided_count": summary["decided"],
                 "recommended_id": group["recommended_id"],
                 "recommended": self.photo_payload(
                     project_id,
@@ -333,11 +351,18 @@ class PhotoQueryService:
             item["similarity_source_id"] = source_id
             item["is_capture_variant"] = int(row["id"]) != source_id
             members.append(item)
+        # Computed over every member, not the search-filtered `members` list:
+        # filtering the view must not change what the group's progress is.
+        summary = group_processing_summary(
+            str(member_row["decision"] or "") for member_row, _ in expanded
+        )
         return {
             "id": group["id"],
             "count": len(expanded),
             "capture_count": len(group["members"]),
             "kind": group["kind"],
+            "status": summary["status"],
+            "decided_count": summary["decided"],
             "recommended_id": group["recommended_id"],
             "face_safe": group["face_safe"],
             "members": members,

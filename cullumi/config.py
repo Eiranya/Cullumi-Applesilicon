@@ -6,6 +6,7 @@ import json
 import math
 import os
 import shutil
+import sys
 import threading
 import time
 import uuid
@@ -211,6 +212,7 @@ def _normalize_simple_settings(
         "confirm_accept_suggestions",
         "auto_check_updates",
         "blink_detection_enabled",
+        "blink_gpu_enabled",
         "niqe_analysis_enabled",
         "sync_variant_decisions",
     ):
@@ -339,7 +341,17 @@ def _normalize_recent_projects(
     return recent[:12]
 
 def app_data_dir() -> Path:
-    base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    """Return the per-user data directory for config, projects and caches.
+
+    Windows keeps using ``%LOCALAPPDATA%``. macOS follows the
+    ``~/Library/Application Support/<App>`` convention so a frozen ``.app``
+    bundle never has to write inside its own read-only ``Contents/Resources``,
+    which would be wiped on every upgrade.
+    """
+    if sys.platform == "darwin":
+        base = Path.home() / "Library" / "Application Support"
+    else:
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
     path = base / APP_NAME
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -374,9 +386,16 @@ class ConfigStore:
             "auto_advance": True,
             "remove_review_on_accept": False,
             "confirm_accept_suggestions": True,
-            "fast_analysis": False,
+            # Analysis is the bulk of a scan (~86% of wall time, measured), and
+            # it is the one stage that parallelises well. Leaving it off meant a
+            # fresh install decoded photos on a single process. The worker pool
+            # is memory-bounded and its size is derived per machine, so enabling
+            # it by default is safe; users who prefer a quieter machine can turn
+            # it off in 设置 → 照片分析.
+            "fast_analysis": True,
             "auto_check_updates": True,
             "blink_detection_enabled": True,
+            "blink_gpu_enabled": True,
             "niqe_analysis_enabled": True,
             "sync_variant_decisions": True,
             "motion_cover_writeback": "ask",
@@ -607,7 +626,7 @@ SIMILARITY_NUMBER_RANGES = {
 }
 WEIGHT_KEYS = ("sharpness", "exposure", "contrast", "entropy", "resolution", "niqe")
 ORDERED_QUALITY_FIELDS = (
-    ("niqe_review", "niqe_remove", "NIQE 复看阈值不能高于移除阈值"),
+    ("niqe_review", "niqe_remove", "画质复看阈值不能高于移除阈值"),
     ("blur_remove", "blur_review", "移除清晰度阈值不能高于复看阈值"),
     ("dark_remove", "dark_review", "严重欠曝阈值不能高于偏暗阈值"),
     ("dark_clip_review", "dark_clip_remove", "暗部溢出复看阈值不能高于移除阈值"),
@@ -648,7 +667,7 @@ def _validate_number_ranges(
 
 def _validate_quality_order(q: dict[str, Any]) -> None:
     if _profile_number(q, "niqe_quality_good") >= _profile_number(q, "niqe_quality_bad"):
-        raise ValueError("NIQE 优质映射阈值必须小于劣质映射阈值")
+        raise ValueError("画质优良基准必须小于低劣基准")
     for lower_key, upper_key, error_text in ORDERED_QUALITY_FIELDS:
         if _profile_number(q, lower_key) > _profile_number(q, upper_key):
             raise ValueError(error_text)
