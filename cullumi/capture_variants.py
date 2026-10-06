@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -29,6 +30,25 @@ FORMAT_EXTENSIONS = {
     "other": OTHER_IMAGE_EXTENSIONS,
 }
 SQLITE_PARAMETER_BATCH = 500
+
+# RAW and JPEG of one exposure are frequently filed apart -- a `raw/`
+# subdirectory next to the JPEG folder is a common layout -- so pairing is keyed
+# on the filename stem alone and the timestamps decide what is really the same
+# shot. The window is deliberately tight: measured burst frames sit one second
+# apart, so a wide window would happily pair neighbouring frames.
+VARIANT_TIME_TOLERANCE_SECONDS = 5
+
+
+def _parse_timestamp(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y:%m:%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(text[:19], fmt).timestamp()
+        except ValueError:
+            continue
+    return None
 
 
 def normalize_extension(extension: Any, relative_path: Any = "") -> str:
@@ -60,9 +80,91 @@ def _row_value(row: Any, key: str, default: Any = None) -> Any:
         return default
 
 
-def _capture_key(row: Any) -> tuple[str, str]:
+def _capture_key(row: Any) -> str:
+    """Group by filename stem; the directory no longer gates pairing.
+
+    The old key was (directory, stem), which made cross-directory pairing
+    structurally impossible -- same stem in two folders landed in two buckets.
+    Grouping on the stem alone is what lets a RAW under `raw/` pair with its
+    JPEG at the root. ``_variant_pairing_candidates`` then decides which
+    members may actually pair, using capture time.
+    """
     relative = Path(str(_row_value(row, "relative_path", "")))
-    return str(relative.parent).casefold(), relative.stem.casefold()
+    return relative.stem.casefold()
+
+
+def _timestamps_agree(left: Any, right: Any) -> bool | None:
+    """Compare two files' capture times.
+
+    Returns True/False when both timestamps are known, or None when at least
+    one side is missing so the caller can fall back. EXIF capture time is
+    intrinsic to the file and survives copying, so it is the primary signal.
+    """
+    left_taken = _parse_timestamp(_row_value(left, "taken"))
+    right_taken = _parse_timestamp(_row_value(right, "taken"))
+    if left_taken is None or right_taken is None:
+        return None
+    return abs(left_taken - right_taken) <= VARIANT_TIME_TOLERANCE_SECONDS
+
+
+def _mtimes_agree(left: Any, right: Any) -> bool | None:
+    """Compare two files' modification times -- a weaker fallback.
+
+    Sync tools rewrite mtime, so this only decides pairs that carry no EXIF
+    timestamp. Returns None when either side has no usable mtime.
+    """
+    try:
+        left_mtime = float(_row_value(left, "mtime") or 0.0)
+        right_mtime = float(_row_value(right, "mtime") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    if left_mtime <= 0.0 or right_mtime <= 0.0:
+        return None
+    return abs(left_mtime - right_mtime) <= VARIANT_TIME_TOLERANCE_SECONDS
+
+
+def _variant_pairing_candidates(members: list[Any]) -> list[Any] | None:
+    """Narrow a stem group to the files that may pair with each other.
+
+    Three tiers, matching what the data can actually support: EXIF capture
+    time, then mtime, then a bare stem match. A wrong pairing costs the user a
+    RAW file, so the tiers only ever widen the set that *may* pair -- a
+    timestamp conflict vetoes the group rather than forcing it through.
+    """
+    raws = [row for row in members if _is_raw(row)]
+    others = [row for row in members if not _is_raw(row)]
+    if not raws or not others:
+        return None
+
+    agreed: list[Any] = []
+    for raw in raws:
+        verdicts = [
+            _timestamps_agree(raw, other)
+            for other in others
+        ]
+        if any(verdict is True for verdict in verdicts):
+            agreed.append(raw)
+            continue
+        if any(verdict is None for verdict in verdicts):
+            # No EXIF anywhere in this pair -- fall back to mtime.
+            mtime_verdicts = [_mtimes_agree(raw, other) for other in others]
+            if any(verdict is True for verdict in mtime_verdicts):
+                agreed.append(raw)
+            elif all(verdict is None for verdict in mtime_verdicts):
+                # Last resort: neither timestamp exists, trust the stem alone.
+                agreed.append(raw)
+            continue
+        # Both sides carry EXIF and none of them agree: different exposures.
+    return agreed or None
+
+
+def _is_raw(row: Any) -> bool:
+    return (
+        normalize_extension(
+            _row_value(row, "extension"), _row_value(row, "relative_path")
+        )
+        in RAW_EXTENSIONS
+    )
 
 
 def _representative_sort_key(row: Any) -> tuple[Any, ...]:
@@ -91,7 +193,7 @@ def _representative_sort_key(row: Any) -> tuple[Any, ...]:
 
 
 def build_capture_variant_memberships(rows: Iterable[Any]) -> dict[int, int]:
-    grouped: dict[tuple[str, str], list[Any]] = defaultdict(list)
+    grouped: dict[str, list[Any]] = defaultdict(list)
     for row in rows:
         extension = normalize_extension(
             _row_value(row, "extension"), _row_value(row, "relative_path")
@@ -112,10 +214,19 @@ def build_capture_variant_memberships(rows: Iterable[Any]) -> dict[int, int]:
             extensions - RAW_EXTENSIONS
         ):
             continue
-        representative = min(members, key=_representative_sort_key)
+        pairable = _variant_pairing_candidates(members)
+        if not pairable:
+            continue
+        # Keep every non-RAW member alongside the confirmed RAW ones: they are
+        # the rendered output of the same exposure and belong in the group.
+        paired_members = pairable + [
+            row for row in members if not _is_raw(row)
+        ]
+        representative = min(paired_members, key=_representative_sort_key)
         representative_id = int(_row_value(representative, "id"))
         memberships.update(
-            (int(_row_value(row, "id")), representative_id) for row in members
+            (int(_row_value(row, "id")), representative_id)
+            for row in paired_members
         )
     return memberships
 
@@ -124,7 +235,8 @@ def rebuild_capture_variants(
     conn: sqlite3.Connection, *, prune_similar: bool = False
 ) -> dict[int, int]:
     rows = conn.execute(
-        """SELECT id,relative_path,extension,error,width,height,megapixels,size
+        """SELECT id,relative_path,extension,error,width,height,megapixels,size,
+                  taken,mtime
              FROM photos WHERE status='active'"""
     ).fetchall()
     memberships = build_capture_variant_memberships(rows)
@@ -369,6 +481,7 @@ __all__ = [
     "FORMAT_CATEGORY_IDS",
     "FORMAT_CATEGORY_LABELS",
     "FORMAT_CATEGORY_ORDER",
+    "VARIANT_TIME_TOLERANCE_SECONDS",
     "active_variant_groups",
     "active_variant_photo_ids",
     "active_variant_rows",

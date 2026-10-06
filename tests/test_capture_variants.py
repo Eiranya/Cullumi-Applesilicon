@@ -111,7 +111,11 @@ class CaptureVariantTests(unittest.TestCase):
         with closing(connect_db(self.project.db_path)) as conn:
             jpg = insert_photo(conn, "Trip/IMG_0001.JPG", size=3_000_000)
             raw = insert_photo(conn, "Trip/img_0001.CR3", size=20_000_000)
-            other_dir = insert_photo(conn, "Other/IMG_0001.NEF")
+            # Same stem, different directory, and a capture time months away:
+            # a name clash between two events, which must not pair.
+            other_dir = insert_photo(
+                conn, "Other/IMG_0001.NEF", taken="2025:03:04 09:15:00"
+            )
             jpeg_only = insert_photo(conn, "Trip/IMG_0002.JPG")
             heif_only = insert_photo(conn, "Trip/IMG_0002.HEIF")
             raw_only_a = insert_photo(conn, "Trip/IMG_0003.CR2")
@@ -891,6 +895,113 @@ class CaptureVariantTests(unittest.TestCase):
                 )
             }
         self.assertEqual(memberships, {jpg: jpg, raw: jpg})
+
+    def test_cross_directory_pairing_accepts_matching_capture_times(self) -> None:
+        """RAW filed under a `raw/` subdirectory pairs with its JPEG at the root."""
+        with closing(connect_db(self.project.db_path)) as conn:
+            jpg = insert_photo(conn, "IMG_0100.JPG", taken="2026:10:02 17:59:44")
+            raw = insert_photo(conn, "raw/IMG_0100.ARW", taken="2026:10:02 17:59:44")
+            memberships = rebuild_capture_variants(conn)
+            conn.commit()
+
+        self.assertEqual(memberships[jpg], jpg)
+        self.assertEqual(memberships[raw], jpg)
+
+    def test_cross_directory_pairing_rejects_conflicting_capture_times(self) -> None:
+        """Same stem but months apart means two events, not one exposure."""
+        with closing(connect_db(self.project.db_path)) as conn:
+            jpg = insert_photo(conn, "IMG_0101.JPG", taken="2026:10:02 17:59:44")
+            other = insert_photo(conn, "raw/IMG_0101.ARW", taken="2025:03:04 09:15:00")
+            memberships = rebuild_capture_variants(conn)
+            conn.commit()
+
+        self.assertNotIn(jpg, memberships)
+        self.assertNotIn(other, memberships)
+
+    def test_pairing_tolerates_small_capture_time_drift(self) -> None:
+        """A few seconds of drift is precision noise, not a different exposure."""
+        with closing(connect_db(self.project.db_path)) as conn:
+            jpg = insert_photo(conn, "IMG_0102.JPG", taken="2026:10:02 17:59:44")
+            raw = insert_photo(conn, "raw/IMG_0102.ARW", taken="2026:10:02 17:59:47")
+            memberships = rebuild_capture_variants(conn)
+            conn.commit()
+
+        self.assertEqual(memberships[raw], jpg)
+
+    def test_pairing_falls_back_to_mtime_when_exif_is_missing(self) -> None:
+        """A RAW with no readable EXIF still pairs on file modification time."""
+        with closing(connect_db(self.project.db_path)) as conn:
+            jpg = insert_photo(conn, "IMG_0103.JPG", taken="2026:10:02 17:59:44")
+            raw = insert_photo(conn, "raw/IMG_0103.ARW", taken="")
+            conn.execute(
+                "UPDATE photos SET mtime=? WHERE id=?", (1_700_000_000.0, jpg)
+            )
+            conn.execute(
+                "UPDATE photos SET mtime=? WHERE id=?", (1_700_000_000.0, raw)
+            )
+            memberships = rebuild_capture_variants(conn)
+            conn.commit()
+
+        self.assertEqual(memberships[raw], jpg)
+
+    def test_pairing_rejects_mtime_fallback_when_it_disagrees(self) -> None:
+        """Without EXIF, an mtime far apart must not silently pair."""
+        with closing(connect_db(self.project.db_path)) as conn:
+            jpg = insert_photo(conn, "IMG_0104.JPG", taken="2026:10:02 17:59:44")
+            raw = insert_photo(conn, "raw/IMG_0104.ARW", taken="")
+            conn.execute(
+                "UPDATE photos SET mtime=? WHERE id=?", (1_700_000_000.0, jpg)
+            )
+            conn.execute(
+                "UPDATE photos SET mtime=? WHERE id=?", (1_700_060_000.0, raw)
+            )
+            memberships = rebuild_capture_variants(conn)
+            conn.commit()
+
+        self.assertNotIn(jpg, memberships)
+        self.assertNotIn(raw, memberships)
+
+    def test_pairing_falls_back_to_stem_when_no_timestamps_exist(self) -> None:
+        """Neither EXIF nor mtime available: trust the stem rather than lose the pair."""
+        with closing(connect_db(self.project.db_path)) as conn:
+            jpg = insert_photo(conn, "IMG_0105.JPG", taken="")
+            raw = insert_photo(conn, "raw/IMG_0105.ARW", taken="")
+            memberships = rebuild_capture_variants(conn)
+            conn.commit()
+
+        self.assertEqual(memberships[raw], jpg)
+
+    def test_same_directory_pairing_still_works_without_timestamps(self) -> None:
+        """The pre-existing same-directory layout keeps working after the change."""
+        with closing(connect_db(self.project.db_path)) as conn:
+            jpg = insert_photo(conn, "Trip/IMG_0106.JPG", taken="")
+            raw = insert_photo(conn, "Trip/IMG_0106.CR3", taken="")
+            memberships = rebuild_capture_variants(conn)
+            conn.commit()
+
+        self.assertEqual(memberships[jpg], jpg)
+        self.assertEqual(memberships[raw], jpg)
+
+    def test_burst_neighbours_are_not_paired_by_filename(self) -> None:
+        """Measured burst frames sit ~1s apart, so the window must stay tight."""
+        with closing(connect_db(self.project.db_path)) as conn:
+            first_jpg = insert_photo(
+                conn, "IMG_0107.JPG", taken="2026:10:02 18:04:56"
+            )
+            second_jpg = insert_photo(
+                conn, "IMG_0108.JPG", taken="2026:10:02 18:04:57"
+            )
+            # Shares the first frame's stem, but captured minutes later -- well
+            # outside the window, so the stem clash must not carry it across.
+            stale_raw = insert_photo(
+                conn, "raw/IMG_0107.ARW", taken="2026:10:02 18:14:56"
+            )
+            memberships = rebuild_capture_variants(conn)
+            conn.commit()
+
+        self.assertNotIn(first_jpg, memberships)
+        self.assertNotIn(second_jpg, memberships)
+        self.assertNotIn(stale_raw, memberships)
 
 
 class CaptureVariantMigrationTests(unittest.TestCase):

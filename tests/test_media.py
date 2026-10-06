@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -355,6 +356,117 @@ class MediaPreviewTests(unittest.TestCase):
                 self.assertEqual(image.size, (100, 80))
             raw.postprocess.assert_called_once_with(half_size=True, use_camera_wb=True, no_auto_bright=False)
 
+
+def build_tiff(date_time=b"2026:10:02 17:59:44\x00", tag=0x0132, byte_order="<"):
+    """Assemble a minimal TIFF file exposing one ASCII DateTime-style tag.
+
+    Real RAW files carry EXIF inside a TIFF container, which is why Pillow's
+    getexif() comes back empty for them. Building the container by hand keeps
+    the test independent of any particular camera's IFD layout.
+    """
+    end = byte_order
+    header = (b"II" if byte_order == "<" else b"MM") + struct.pack(
+        f"{end}H", 42
+    ) + struct.pack(f"{end}I", 8)
+    value_offset = 8 + 2 + 12 + 4
+    entry = struct.pack(f"{end}HHI", tag, 2, len(date_time)) + struct.pack(
+        f"{end}I", value_offset
+    )
+    ifd = struct.pack(f"{end}H", 1) + entry + struct.pack(f"{end}I", 0)
+    return header + ifd + date_time
+
+
+def build_nested_tiff() -> bytes:
+    """A TIFF whose IFD0 holds DateTime and points at an Exif sub-IFD.
+
+    The sub-IFD carries DateTimeOriginal, so a correct reader must prefer it:
+    some cameras leave DateTime as a copy date rather than the exposure.
+    """
+    original = b"2026:10:02 09:30:00\x00"
+    copied = b"2026:10:02 17:59:44\x00"
+    header_size = 8
+    # IFD0: 2 entries (Exif pointer, DateTime) + next-IFD pointer.
+    exif_ifd_offset = header_size + 2 + 24 + 4
+    exif_ifd_size = 2 + 12 + 4
+    copied_value_offset = exif_ifd_offset + exif_ifd_size
+    original_value_offset = copied_value_offset + len(copied)
+    return b"".join(
+        [
+            b"II",
+            struct.pack("<H", 42),
+            struct.pack("<I", header_size),
+            struct.pack("<H", 2),
+            # Exif IFD pointer -- entries must be in ascending tag order.
+            struct.pack("<HHI", 0x8769, 4, 1) + struct.pack("<I", exif_ifd_offset),
+            struct.pack("<HHI", 0x0132, 2, len(copied))
+            + struct.pack("<I", copied_value_offset),
+            struct.pack("<I", 0),
+            # Exif sub-IFD.
+            struct.pack("<H", 1),
+            struct.pack("<HHI", 0x9003, 2, len(original))
+            + struct.pack("<I", original_value_offset),
+            struct.pack("<I", 0),
+            copied,
+            original,
+        ]
+    )
+
+
+class RawExifDatetimeTests(unittest.TestCase):
+    def _write(self, payload: bytes, name: str = "sample.ARW") -> Path:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / name
+        path.write_bytes(payload)
+        return path
+
+    def test_datetime_tag_is_read_from_ifd0(self):
+        for order in ("<", ">"):
+            with self.subTest(byte_order=order):
+                path = self._write(build_tiff(byte_order=order))
+                self.assertEqual(
+                    media._raw_exif_datetime(path), "2026:10:02 17:59:44"
+                )
+
+    def test_datetime_original_is_preferred_over_datetime(self):
+        path = self._write(build_nested_tiff())
+        self.assertEqual(media._raw_exif_datetime(path), "2026:10:02 09:30:00")
+
+    def test_non_tiff_and_missing_files_return_empty_string(self):
+        self.assertEqual(media._raw_exif_datetime(self._write(b"not a tiff at all")), "")
+        self.assertEqual(media._raw_exif_datetime(self._write(b"")), "")
+        self.assertEqual(media._raw_exif_datetime(Path("/no/such/file.ARW")), "")
+
+    def test_truncated_ifd_returns_empty_string_rather_than_raising(self):
+        payload = build_tiff()
+        self.assertEqual(
+            media._raw_exif_datetime(self._write(payload[: len(payload) - 12])), ""
+        )
+
+    def test_out_of_range_ifd_offset_returns_empty_string(self):
+        payload = bytearray(build_tiff())
+        payload[4:8] = struct.pack("<I", 0xFFFFFFF0)
+        self.assertEqual(media._raw_exif_datetime(self._write(bytes(payload))), "")
+
+    def test_raw_branch_reports_the_capture_time(self):
+        jpeg_bytes = io.BytesIO()
+        Image.new("RGB", (64, 48), (10, 20, 30)).save(jpeg_bytes, "JPEG")
+        data = jpeg_bytes.getvalue()
+        raw = mock.MagicMock()
+        raw.__enter__.return_value = raw
+        raw.extract_thumb.return_value = mock.Mock(
+            format=media.rawpy.ThumbFormat.JPEG, data=data
+        )
+        # A TIFF header followed by the embedded JPEG stands in for a real RAW:
+        # enough for the EXIF reader, and rawpy itself stays mocked out.
+        path = self._write(build_tiff() + b"\x00" * 4 + data)
+        with mock.patch.object(media.rawpy, "imread", return_value=raw):
+            _, taken = media.open_image(path, (512, 512))
+        self.assertEqual(taken, "2026:10:02 17:59:44")
+
+    def test_analysis_version_bumped_so_raw_rescans(self):
+        self.assertEqual(media.analysis_version(Path("a.ARW")), "raw-preview512-v3")
+        self.assertEqual(media.analysis_version(Path("a.jpg")), "rgb512-v1")
 
 
 if __name__ == "__main__":

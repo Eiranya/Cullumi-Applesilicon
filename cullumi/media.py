@@ -4,6 +4,7 @@ import hashlib
 import io
 import math
 import os
+import struct
 import threading
 import uuid
 from pathlib import Path
@@ -79,7 +80,134 @@ def _dhash(gray: Image.Image) -> str:
 
 
 def analysis_version(path: Path) -> str:
-    return "raw-preview512-v2" if path.suffix.lower() in RAW_EXTENSIONS else "rgb512-v1"
+    return "raw-preview512-v3" if path.suffix.lower() in RAW_EXTENSIONS else "rgb512-v1"
+
+
+# RAW keeps EXIF inside a TIFF container rather than a JPEG APP1 segment, so
+# Pillow's getexif() does not surface it. Only the head of the file is read --
+# the IFD chain lives near the start -- so this never pulls a whole 40MB frame
+# into memory nor decodes pixels.
+RAW_EXIF_SCAN_BYTES = 2 * 1024 * 1024
+_RAW_EXIF_MAX_DEPTH = 3
+_RAW_EXIF_MAX_ENTRIES = 200
+_RAW_EXIF_TAG_DATETIME_ORIGINAL = 0x9003
+_RAW_EXIF_TAG_DATETIME = 0x0132
+_RAW_EXIF_TYPE_ASCII = 2
+_RAW_EXIF_TYPE_LONG = 4
+_RAW_EXIF_SUB_IFD_TAGS = (0x8769, 0x014A)  # Exif IFD, then its Interop IFD
+
+
+def _raw_exif_ascii(data: bytes, byte_order: str, entry_offset: int,
+                    value_type: int, count: int) -> str:
+    """Read one ASCII IFD entry, inlining the value when it fits in 4 bytes."""
+    if value_type != _RAW_EXIF_TYPE_ASCII or count <= 0:
+        return ""
+    if count <= 4:
+        raw = data[entry_offset : entry_offset + count]
+    else:
+        if entry_offset + 4 > len(data):
+            return ""
+        (value_offset,) = struct.unpack_from(f"{byte_order}I", data, entry_offset)
+        if not 0 <= value_offset < len(data):
+            return ""
+        raw = data[value_offset : value_offset + count]
+    if len(raw) < count:
+        # Truncated file: a partial timestamp would pair files that merely look
+        # alike, so treat it as unreadable rather than guessing.
+        return ""
+    text = raw.split(b"\x00", 1)[0]
+    value = text.decode("ascii", "replace").strip()
+    # A capture time is always a full "YYYY:MM:DD HH:MM:SS" stamp. Anything
+    # shorter means we read the wrong bytes, not that the field is partial.
+    if len(value) < 19 or value[4] != ":":
+        return ""
+    return value
+
+
+def _raw_exif_datetime(path: Path) -> str:
+    """Return the capture timestamp stored in a RAW file, or "" when absent.
+
+    Walks the TIFF IFD chain looking for DateTimeOriginal, then DateTime.
+    Anything unexpected -- not a TIFF, truncated, an out-of-range offset --
+    yields "" so the caller can fall back, rather than raising.
+    """
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(RAW_EXIF_SCAN_BYTES)
+    except OSError:
+        return ""
+
+    if len(data) < 8 or data[:2] not in (b"II", b"MM"):
+        return ""
+    byte_order = "<" if data[:2] == b"II" else ">"
+    try:
+        if struct.unpack_from(f"{byte_order}H", data, 2)[0] != 42:
+            return ""
+        (first_ifd,) = struct.unpack_from(f"{byte_order}I", data, 4)
+    except struct.error:
+        return ""
+
+    # DateTimeOriginal (0x9003) is the capture time and wins over the IFD0
+    # DateTime (0x0132), which some cameras leave as a copy/metadata date.
+    # Each pass gets its own visited set: an IFD that yielded nothing for one
+    # tag may still hold the other.
+    for tag in (_RAW_EXIF_TAG_DATETIME_ORIGINAL, _RAW_EXIF_TAG_DATETIME):
+        value = _search_ifd(data, byte_order, first_ifd, tag, 0, set())
+        if value:
+            return value
+    return ""
+
+
+def _search_ifd(data: bytes, byte_order: str, ifd_offset: int, wanted_tag: int,
+                depth: int, visited: set[int]) -> str:
+    """Depth-first search for one tag across the IFD chain."""
+    if depth > _RAW_EXIF_MAX_DEPTH or ifd_offset in visited:
+        return ""
+    if not 0 < ifd_offset < len(data) - 2:
+        return ""
+    visited.add(ifd_offset)
+    try:
+        (entry_count,) = struct.unpack_from(f"{byte_order}H", data, ifd_offset)
+    except struct.error:
+        return ""
+    if not 0 < entry_count <= _RAW_EXIF_MAX_ENTRIES:
+        return ""
+
+    sub_ifd_offsets: list[int] = []
+    for index in range(entry_count):
+        entry_offset = ifd_offset + 2 + index * 12
+        if entry_offset + 12 > len(data):
+            break
+        try:
+            tag, value_type, count = struct.unpack_from(
+                f"{byte_order}HHI", data, entry_offset
+            )
+        except struct.error:
+            break
+        value_offset = entry_offset + 8
+        if tag == wanted_tag:
+            value = _raw_exif_ascii(
+                data, byte_order, value_offset, value_type, count
+            )
+            if value:
+                return value
+        elif tag in _RAW_EXIF_SUB_IFD_TAGS and value_type == _RAW_EXIF_TYPE_LONG:
+            # Sub-IFDs normally store their offset where a short value would
+            # sit, i.e. in the first four bytes of the value field.
+            try:
+                (sub_offset,) = struct.unpack_from(f"{byte_order}I", data, value_offset)
+            except struct.error:
+                continue
+            if sub_offset:
+                sub_ifd_offsets.append(sub_offset)
+
+    for sub_offset in sub_ifd_offsets:
+        value = _search_ifd(
+            data, byte_order, sub_offset, wanted_tag, depth + 1, visited
+        )
+        if value:
+            return value
+    return ""
 
 
 def _open_raw(path: Path, decode_size: tuple[int, int] | None = None) -> Image.Image:
@@ -136,7 +264,7 @@ def open_image(
     decode_size: tuple[int, int] | None = None,
 ) -> tuple[Image.Image, str]:
     if path.suffix.lower() in RAW_EXTENSIONS:
-        return _open_raw(path, decode_size), ""
+        return _open_raw(path, decode_size), _raw_exif_datetime(path)
     if path.suffix.lower() in HEIF_EXTENSIONS:
         source = _open_heif(path)
         try:
