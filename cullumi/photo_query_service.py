@@ -96,6 +96,38 @@ def photo_sort_order(sort: str, direction: str = "asc") -> str:
     )
 
 
+def similarity_card_row(source: Any, variants: dict[int, list[Any]]) -> Any:
+    """Pick the single row one capture contributes to a similarity group.
+
+    A similarity group is a set of *shots*, and a shot's RAW is not another
+    shot -- it is the same exposure the library has already folded into the
+    JPEG's card. Handing the whole variant list to the browser is what put
+    RAW back on screen in the similar view, so the expansion keeps one row
+    per capture here and speaks the same dialect as the library listing.
+
+    ``rows[0]`` is the capture-variant representative (the ORDER BY in
+    active_variant_rows puts it first), i.e. the very file the library would
+    show for this exposure. It is normally a JPEG, and then there is nothing
+    to choose. It is RAW only when no readable non-RAW file shares the
+    exposure -- and that case has to stay on screen: a RAW-only capture is
+    the only copy of that shot, so dropping it would hide a photo the user is
+    being asked to judge and let its decision be made without ever being
+    seen. Requiring the substitute to be readable stops a broken JPEG from
+    taking the card away from a RAW that opens fine.
+    """
+    rows = variants.get(int(source["id"])) or [source]
+    head = rows[0]
+    if format_category(head["extension"], head["relative_path"]) != "raw":
+        return head
+    for row in rows:
+        if (
+            format_category(row["extension"], row["relative_path"]) != "raw"
+            and not str(row["error"] or "")
+        ):
+            return row
+    return head
+
+
 def expanded_similarity_members(
     group: dict[str, Any], variants: dict[int, list[Any]]
 ) -> list[tuple[Any, int]]:
@@ -103,27 +135,69 @@ def expanded_similarity_members(
     if group["kind"] != "similar":
         return [(row, int(row["id"])) for row in members]
     recommended_id = int(group["recommended_id"])
+    # Two members can share one capture (the RAW and its JPEG both carrying a
+    # stale edge), so ownership is still resolved before anything is emitted.
+    # The card is chosen first: the member that owns the card is the one whose
+    # id the group is keyed by, and `recommended_id` addresses members, not
+    # files, so the recommendation still lands on the right card even when the
+    # card happens to be a sibling of the recommended member.
     owners: dict[int, int] = {}
     priority = sorted(
         members,
         key=lambda row: (int(row["id"]) != recommended_id),
     )
     for source in priority:
-        source_id = int(source["id"])
-        for row in variants.get(source_id) or [source]:
-            owners.setdefault(int(row["id"]), source_id)
+        owners.setdefault(
+            int(similarity_card_row(source, variants)["id"]), int(source["id"])
+        )
 
     expanded: list[tuple[Any, int]] = []
     emitted: set[int] = set()
     for source in members:
         source_id = int(source["id"])
-        for row in variants.get(source_id) or [source]:
-            photo_id = int(row["id"])
-            if owners.get(photo_id) != source_id or photo_id in emitted:
-                continue
-            emitted.add(photo_id)
-            expanded.append((row, source_id))
+        card = similarity_card_row(source, variants)
+        photo_id = int(card["id"])
+        if owners.get(photo_id) != source_id or photo_id in emitted:
+            continue
+        emitted.add(photo_id)
+        expanded.append((card, source_id))
     return expanded
+
+
+def similarity_cover_rows(
+    group: dict[str, Any], variants: dict[int, list[Any]]
+) -> list[tuple[Any, int]]:
+    """The sidebar folder stack: one card per exposure, in rank order.
+
+    Same rule as :func:`expanded_similarity_members` -- a capture contributes
+    the single row :func:`similarity_card_row` picks, so one exposure never
+    occupies two slots. The two lists needed it separately because they are
+    built from different member subsets: ``cover_ids`` is a *ranking* of
+    members truncated to four (cullumi/similarity.py), and the RAW plus the
+    JPEG of one capture are two members of the same shot. When a stale edge
+    links that pair they can both reach the top four, resolve to the same
+    JPEG, and the folder stacks the same picture twice out of four slots.
+
+    The earlier one wins and the duplicate is dropped rather than backfilled:
+    the stack is a ranking, so promoting the group's fifth-best member to
+    fill the hole would show a worse picture than the three that remain, and
+    a repeated picture is a worse lie than a shorter stack.
+
+    The result is never empty. ``cover_ids`` leads with the recommended
+    member, the first entry is always kept, and the caller falls back to the
+    recommended card regardless -- so a group can never render a coverless
+    folder. The four-slot cap holds because folding only ever removes rows.
+    """
+    rows: list[tuple[Any, int]] = []
+    seen: set[int] = set()
+    for source in group["covers"]:
+        card = similarity_card_row(source, variants)
+        photo_id = int(card["id"])
+        if photo_id in seen:
+            continue
+        seen.add(photo_id)
+        rows.append((card, int(source["id"])))
+    return rows
 
 
 def _matching_similarity_photo_ids(
@@ -363,6 +437,23 @@ class PhotoQueryService:
             summary = group_processing_summary(
                 str(member_row["decision"] or "") for member_row, _ in expanded
             )
+            # The sidebar stacks the same cards the detail view shows, so the
+            # covers go through the same rule twice over: a RAW thumbnail here
+            # would put the file the expansion just removed right back on
+            # screen, and two members of one capture would stack one picture
+            # twice. The extension badge is still looked up by the member's
+            # id, so a card still announces that a RAW exists behind it.
+            recommended = group["recommended"]
+            cover_rows = similarity_cover_rows(group, variant_rows)
+            if not cover_rows:
+                # Unreachable while cover_ids leads with the recommended member,
+                # but the folder template indexes its stack unconditionally, so
+                # an empty list would render a blank folder rather than fail
+                # loudly. Lead with the recommended card instead.
+                cover_rows = [
+                    (similarity_card_row(recommended, variant_rows),
+                     int(recommended["id"]))
+                ]
             items.append({
                 "id": group["id"],
                 "count": len(expanded),
@@ -373,18 +464,18 @@ class PhotoQueryService:
                 "recommended_id": group["recommended_id"],
                 "recommended": self.photo_payload(
                     project_id,
-                    group["recommended"],
+                    similarity_card_row(recommended, variant_rows),
                     profile,
-                    variants.get(int(group["recommended"]["id"]), []),
+                    variants.get(int(recommended["id"]), []),
                 ),
                 "covers": [
                     self.photo_payload(
                         project_id,
-                        row,
+                        card,
                         profile,
-                        variants.get(int(row["id"]), []),
+                        variants.get(int(source_id), []),
                     )
-                    for row in group["covers"]
+                    for card, source_id in cover_rows
                 ],
                 "face_safe": group["face_safe"],
             })
@@ -446,4 +537,10 @@ class PhotoQueryService:
         }
 
 
-__all__ = ["PhotoQueryService", "photo_sort_order"]
+__all__ = [
+    "PhotoQueryService",
+    "expanded_similarity_members",
+    "photo_sort_order",
+    "similarity_card_row",
+    "similarity_cover_rows",
+]

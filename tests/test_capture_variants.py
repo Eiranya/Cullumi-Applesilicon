@@ -234,7 +234,10 @@ class CaptureVariantTests(unittest.TestCase):
         )
         self.assertEqual(listing["total"], 1)
         self.assertEqual(listing["items"][0]["capture_count"], 2)
-        self.assertEqual(listing["items"][0]["count"], 4)
+        # One card per exposure, exactly like the library: the RAW is folded
+        # into its JPEG here too, so the group counts the two JPEGs and the
+        # CR3 files never reach the screen.
+        self.assertEqual(listing["items"][0]["count"], 2)
         detail = application.photo_queries.similar_group(
             {
                 "project_id": [self.project.project_id],
@@ -242,17 +245,35 @@ class CaptureVariantTests(unittest.TestCase):
             }
         )
         self.assertEqual(detail["capture_count"], 2)
-        self.assertEqual(detail["count"], 4)
+        self.assertEqual(detail["count"], 2)
         self.assertEqual(
             {int(item["id"]) for item in detail["members"]},
-            {first_jpg, first_raw, second_jpg, second_raw},
+            {first_jpg, second_jpg},
         )
-        sources = {
-            int(item["id"]): int(item["similarity_source_id"])
-            for item in detail["members"]
-        }
-        self.assertEqual(sources[first_raw], first_jpg)
-        self.assertEqual(sources[second_raw], second_jpg)
+        self.assertEqual(
+            {item["format_category"] for item in detail["members"]}, {"jpeg"}
+        )
+        # Folding the RAW away must not hide that it exists: the card keeps
+        # announcing the CR3 sitting behind it.
+        self.assertEqual(
+            [item["variant_extensions"] for item in detail["members"]],
+            [["CR3", "JPG"], ["CR3", "JPG"]],
+        )
+        # ...and it must not orphan it either. A decision taken on the card
+        # still writes through to the RAW, so no file is ever disposed of
+        # without the user having been shown it.
+        set_photo_decision(self.project, first_jpg, "remove", True)
+        with closing(connect_db(self.project.db_path)) as conn:
+            decisions = {
+                int(row["id"]): str(row["decision"] or "")
+                for row in conn.execute(
+                    "SELECT id,decision FROM photos WHERE id IN (?,?)",
+                    (first_jpg, first_raw),
+                )
+            }
+        self.assertEqual(
+            decisions, {first_jpg: "remove", first_raw: "remove"}
+        )
 
     def test_exact_duplicates_still_include_nonrepresentative_files(self) -> None:
         with closing(connect_db(self.project.db_path)) as conn:
@@ -913,9 +934,13 @@ class CaptureVariantTests(unittest.TestCase):
                 "offset": ["0"],
             }
         )
+        # The group is found by the RAW's path even though no RAW is listed:
+        # the search maps a folded file onto its representative, so searching
+        # for the file the user remembers still lands on the right group.
         self.assertEqual(raw_search["total"], 1)
         self.assertEqual(len(raw_search["items"]), 1)
-        self.assertEqual(raw_search["items"][0]["count"], 3)
+        # Two captures (the NEF+JPG exposure and its MATE), not three files.
+        self.assertEqual(raw_search["items"][0]["count"], 2)
         self.assertIn(
             ["NEF", "JPG"],
             [
@@ -1346,7 +1371,13 @@ class CaptureVariantFoldingTests(unittest.TestCase):
         self.assertEqual(self.library_ids(), {jpg})
 
     def test_visual_similarity_group_members_are_not_folded(self) -> None:
-        """Similar groups have their own expand UI; members must survive."""
+        """Similar groups have their own expand UI; members must survive.
+
+        "Not folded" here means *not merged into one card for the whole
+        group*: each exposure keeps a card of its own. Within a card the
+        library's rule still applies, so a capture's RAW stays folded into
+        its JPEG -- the same dialect the photo grid speaks.
+        """
         with closing(connect_db(self.project.db_path)) as conn:
             first_jpg = insert_photo(conn, "IMG_2005.JPG")
             insert_photo(conn, "IMG_2005.CR3", size=20_000_000)
@@ -1374,9 +1405,14 @@ class CaptureVariantFoldingTests(unittest.TestCase):
                 "group_id": [listing["items"][0]["id"]],
             }
         )
-        self.assertEqual(detail["count"], 4)
-        self.assertEqual(len({int(item["id"]) for item in detail["members"]}), 4)
-        self.assertTrue(
+        self.assertEqual(detail["count"], 2)
+        self.assertEqual(
+            {int(item["id"]) for item in detail["members"]},
+            {first_jpg, second_jpg},
+        )
+        # Every card is a representative of its own capture, so nothing in
+        # the group claims to be a folded sibling any more.
+        self.assertFalse(
             any(item["is_capture_variant"] for item in detail["members"])
         )
 
@@ -3488,6 +3524,565 @@ class DisplayPreviewEncodingTests(unittest.TestCase):
         self.assertEqual(len(same_width), 1, f"同宽度的旧指纹没清理：{same_width}")
         self.assertNotEqual(narrow, rebuilt)
         self.assertTrue(wide.is_file(), "剪枝误伤了其它档位")
+
+
+class SimilarGroupRawFoldingTests(unittest.TestCase):
+    """A similarity group shows one card per exposure, RAW folded away.
+
+    The photo grid already folds a capture's RAW into its JPEG
+    (capture_variant_collapse_clause). The similar view used to hand the
+    browser the whole variant list instead, which put every RAW back on
+    screen next to the JPEG it belongs to. These tests pin the rule and,
+    more importantly, its edges: a RAW that is the *only* copy of a shot has
+    to stay, or the user would be deciding on a file they cannot see.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.photos = self.root / "photos"
+        self.photos.mkdir()
+        self.config = ConfigStore(self.root / "config.json")
+        self.config.data["default_cache_root"] = str(self.root / "cache")
+        self.config.save()
+        self.manager = ProjectManager(self.config)
+        self.project = self.manager.open(str(self.photos))
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def application(self) -> http_api.ApplicationContext:
+        scanner = Scanner(self.config, self.manager)
+        return http_api.ApplicationContext(
+            self.config,
+            self.manager,
+            scanner,
+            SimilarityGroupCache(),
+            "test-token",
+            Path("web"),
+        )
+
+    def link(
+        self, conn: Any, left: int, right: int, recommended: int, kind: str
+    ) -> None:
+        conn.execute(
+            """INSERT INTO similar_pairs(
+                 a_id,b_id,score,kind,recommended_id,face_safe
+               ) VALUES(?,?,?,?,?,?)""",
+            (left, right, 0.95, kind, recommended, 0),
+        )
+
+    def detail(self) -> dict[str, Any]:
+        """The single similarity group, as the detail pane receives it."""
+        application = self.application()
+        listing = application.photo_queries.similar_groups(
+            {"project_id": [self.project.project_id]}
+        )
+        self.assertEqual(listing["total"], 1)
+        return application.photo_queries.similar_group(
+            {
+                "project_id": [self.project.project_id],
+                "group_id": [listing["items"][0]["id"]],
+            }
+        )
+
+    def test_a_raw_without_a_jpeg_sibling_stays_on_screen(self) -> None:
+        """A RAW-only camera must not lose its photos from the review.
+
+        Folding is a statement about *variants*: the RAW is hidden because a
+        JPEG shows the same exposure. With no JPEG there is nothing to fold
+        into, so the capture keeps its card -- hiding it would let a decision
+        be taken on a file that was never displayed.
+        """
+        with closing(connect_db(self.project.db_path)) as conn:
+            solo_raw = insert_photo(conn, "SOLO_5001.CR3", size=20_000_000)
+            mate = insert_photo(conn, "MATE_5001.JPG")
+            rebuild_capture_variants(conn)
+            self.assertNotIn(
+                solo_raw,
+                {
+                    int(row["photo_id"])
+                    for row in conn.execute(
+                        "SELECT photo_id FROM capture_variant_members"
+                    )
+                },
+            )
+            self.link(conn, solo_raw, mate, solo_raw, "similar")
+            conn.commit()
+
+        detail = self.detail()
+        self.assertEqual(detail["count"], 2)
+        self.assertEqual(
+            {int(item["id"]) for item in detail["members"]}, {solo_raw, mate}
+        )
+        raw_card = next(
+            item for item in detail["members"] if int(item["id"]) == solo_raw
+        )
+        self.assertEqual(raw_card["format_category"], "raw")
+        self.assertIsNotNone(raw_card["quality_score"])
+        # No sibling, so nothing to announce.
+        self.assertEqual(raw_card["variant_extensions"], [])
+
+    def test_an_unreadable_jpeg_never_takes_the_card_from_a_raw(self) -> None:
+        """The substitute has to be readable, not merely non-RAW.
+
+        When the JPEG of an exposure is corrupt the capture's representative
+        *is* the RAW, and a RAW that opens fine is a far better card than the
+        broken JPEG sitting next to it in the variant list.
+        """
+        with closing(connect_db(self.project.db_path)) as conn:
+            broken_jpg = insert_photo(conn, "BROKEN_5002.JPG", error="boom")
+            raw = insert_photo(conn, "BROKEN_5002.CR3", size=20_000_000)
+            mate = insert_photo(conn, "MATE_5002.JPG")
+            rebuild_capture_variants(conn)
+            # The readable RAW wins the representative slot precisely because
+            # the JPEG is unreadable -- that is the case under test.
+            representative = {
+                int(row["representative_id"])
+                for row in conn.execute(
+                    """SELECT representative_id FROM capture_variant_members
+                        WHERE photo_id=?""",
+                    (raw,),
+                )
+            }
+            self.assertEqual(representative, {raw})
+            self.link(conn, raw, mate, raw, "similar")
+            conn.commit()
+
+        detail = self.detail()
+        self.assertEqual(detail["count"], 2)
+        self.assertIn(raw, {int(item["id"]) for item in detail["members"]})
+        self.assertNotIn(
+            broken_jpg, {int(item["id"]) for item in detail["members"]}
+        )
+        raw_card = next(
+            item for item in detail["members"] if int(item["id"]) == raw
+        )
+        self.assertEqual(raw_card["format_category"], "raw")
+        self.assertIsNotNone(raw_card["quality_score"])
+        # The RAW is still announced as the capture's card.
+        self.assertEqual(raw_card["variant_extensions"], ["CR3", "JPG"])
+
+    def test_a_raw_member_renders_as_its_jpeg_and_keeps_the_recommendation(
+        self,
+    ) -> None:
+        """`recommended_id` addresses members, so a RAW can hold it.
+
+        The recommendation ranks members by face/quality/path only -- it has
+        no reason to prefer a JPEG. When the winner happens to be a RAW, the
+        card shown for it is the JPEG, and the frontend recognises the
+        recommendation by comparing `similarity_source_id` (the member) with
+        `recommended_id`, so the badge still lands on the right card.
+        """
+        with closing(connect_db(self.project.db_path)) as conn:
+            jpg = insert_photo(conn, "AAA_5003.JPG")
+            raw = insert_photo(conn, "AAA_5003.CR3", size=20_000_000)
+            mate = insert_photo(conn, "ZZZ_5003.JPG")
+            rebuild_capture_variants(conn)
+            # 'aaa_5003.cr3' sorts before 'zzz_5003.jpg' and both score the
+            # same, so the RAW takes the recommendation.
+            self.link(conn, raw, mate, raw, "similar")
+            conn.commit()
+
+        detail = self.detail()
+        self.assertEqual(detail["recommended_id"], raw)
+        self.assertEqual(detail["count"], 2)
+        self.assertEqual(
+            {int(item["id"]) for item in detail["members"]}, {jpg, mate}
+        )
+        card = next(
+            item for item in detail["members"] if int(item["id"]) == jpg
+        )
+        # The card is the JPEG, but it still answers to its own member id, so
+        # `(similarity_source_id || id) === recommended_id` holds for it.
+        self.assertEqual(card["similarity_source_id"], raw)
+        self.assertEqual(card["format_category"], "jpeg")
+
+    def test_a_group_never_goes_empty_when_two_members_share_one_capture(
+        self,
+    ) -> None:
+        """Self-similar endpoints collapse to one card, never to none.
+
+        A stale edge can link a RAW to its own JPEG. Both are members, so the
+        group clears the two-member minimum, but they are one exposure and
+        resolve to one card. The group is still returned -- the minimum is a
+        property of the *members*, and re-applying it after folding would make
+        the group vanish from a list it is legitimately on.
+        """
+        with closing(connect_db(self.project.db_path)) as conn:
+            jpg = insert_photo(conn, "PAIR_5004.JPG")
+            raw = insert_photo(conn, "PAIR_5004.CR3", size=20_000_000)
+            rebuild_capture_variants(conn)
+            self.link(conn, jpg, raw, raw, "similar")
+            conn.commit()
+
+        detail = self.detail()
+        self.assertEqual(detail["capture_count"], 2)
+        self.assertEqual(detail["count"], 1)
+        self.assertEqual([int(item["id"]) for item in detail["members"]], [jpg])
+        self.assertEqual(
+            detail["members"][0]["similarity_source_id"], detail["recommended_id"]
+        )
+
+    def test_exact_groups_keep_every_file(self) -> None:
+        """Byte-identical groups are a different question and stay as they are.
+
+        `kind="exact"` answers "are these the same file?", where every copy is
+        the point -- a RAW copy of a RAW is a real duplicate to delete. That
+        branch never expanded, and it must not start folding.
+        """
+        with closing(connect_db(self.project.db_path)) as conn:
+            jpg = insert_photo(conn, "DUP_5005.JPG", sha256="same-bytes")
+            insert_photo(
+                conn, "DUP_5005.CR3", size=20_000_000, sha256="raw-bytes"
+            )
+            copy = insert_photo(
+                conn, "Copies/DUP_5005_COPY.JPG", sha256="same-bytes"
+            )
+            rebuild_capture_variants(conn)
+            self.link(conn, jpg, copy, jpg, "exact")
+            conn.commit()
+
+        detail = self.detail()
+        self.assertEqual(detail["kind"], "exact")
+        self.assertEqual(detail["count"], 2)
+        self.assertEqual(
+            {int(item["id"]) for item in detail["members"]}, {jpg, copy}
+        )
+
+    def test_the_sidebar_covers_carry_no_raw_either(self) -> None:
+        """The folder stack is the same picture, one size down.
+
+        The recommendation ranks members, and nothing in that ranking prefers
+        a JPEG, so the cover a group leads with can well be a RAW member.
+        Leaving the covers on raw member rows would put the file the detail
+        view just removed straight back on screen in the list beside it.
+        """
+        with closing(connect_db(self.project.db_path)) as conn:
+            insert_photo(conn, "AAA_5006.JPG")
+            raw = insert_photo(conn, "AAA_5006.CR3", size=20_000_000)
+            mate = insert_photo(conn, "ZZZ_5006.JPG")
+            rebuild_capture_variants(conn)
+            # 'aaa_5006.cr3' sorts first, so the RAW member leads the group.
+            self.link(conn, raw, mate, raw, "similar")
+            conn.commit()
+
+        application = self.application()
+        listing = application.photo_queries.similar_groups(
+            {"project_id": [self.project.project_id]}
+        )
+        item = listing["items"][0]
+        self.assertEqual(item["recommended_id"], raw)
+        self.assertNotIn(
+            "raw", {cover["format_category"] for cover in item["covers"]}
+        )
+        self.assertNotEqual(item["recommended"]["format_category"], "raw")
+        # The sidebar thumbnail is the JPEG card itself, not the RAW member it
+        # was recommended from: the folder stack then requests a thumbnail the
+        # browser can actually paint, and shows the same picture the detail
+        # pane will open.
+        self.assertEqual(
+            item["recommended"]["id"],
+            int(
+                self.application().photo_queries.similar_group(
+                    {
+                        "project_id": [self.project.project_id],
+                        "group_id": [item["id"]],
+                    }
+                )["members"][0]["id"]
+            ),
+        )
+        self.assertEqual(item["recommended"]["format_category"], "jpeg")
+        # ...and the RAW behind the card is still advertised.
+        self.assertIn(
+            ["CR3", "JPG"],
+            [cover["variant_extensions"] for cover in item["covers"]],
+        )
+
+    def test_the_sidebar_never_stacks_one_exposure_twice(self) -> None:
+        """Two members of one capture must not both reach the folder stack.
+
+        `cover_ids` is a ranking of *members* truncated to four, and the RAW
+        plus the JPEG of a single exposure are two members of the same shot.
+        Rank them high enough and both land in the top four, both resolve to
+        the same JPEG card, and the folder stacks one picture twice -- which
+        reads as "this group holds more photos than it does" and wastes one of
+        the four slots.
+
+        Reverse proof: the assertion is on the ids, so a stack that still
+        carries both members fails here rather than merely looking plausible.
+        """
+        with closing(connect_db(self.project.db_path)) as conn:
+            first = insert_photo(conn, "AAA_6001.JPG")
+            first_raw = insert_photo(
+                conn, "AAA_6001.CR3", size=20_000_000
+            )
+            second = insert_photo(conn, "BBB_6001.JPG")
+            third = insert_photo(conn, "CCC_6001.JPG")
+            fourth = insert_photo(conn, "DDD_6001.JPG")
+            rebuild_capture_variants(conn)
+            # A chain so all five members form ONE group: the stale RAW<->JPEG
+            # edge is what puts both halves of the capture in the ranking.
+            self.link(conn, first, first_raw, first_raw, "similar")
+            self.link(conn, first, second, first_raw, "similar")
+            self.link(conn, second, third, first_raw, "similar")
+            self.link(conn, third, fourth, first_raw, "similar")
+            conn.commit()
+
+        application = self.application()
+        listing = application.photo_queries.similar_groups(
+            {"project_id": [self.project.project_id]}
+        )
+        self.assertEqual(listing["total"], 1)
+        item = listing["items"][0]
+        # The precondition: both halves of the capture really are members, and
+        # both really are ranked into the four cover slots. Without this the
+        # assertions below could pass on a group that never had the problem.
+        self.assertEqual(item["capture_count"], 5)
+        self.assertEqual(item["count"], 4)
+        cover_ids = [int(cover["id"]) for cover in item["covers"]]
+        self.assertEqual(len(cover_ids), len(set(cover_ids)))
+        # Five members, four of them distinct exposures, so the stack holds
+        # three: the pair collapses to one and the fourth-ranked member
+        # (DDD) is the one that falls outside the four cover slots.
+        self.assertEqual(len(item["covers"]), 3)
+        self.assertIn(first, cover_ids)
+        self.assertNotIn(first_raw, cover_ids)
+        # The three stacked cards are three different pictures.
+        self.assertEqual(sorted(cover_ids), sorted([first, second, third]))
+        # The stack is a ranking, not the whole group: it holds the top four
+        # members, and the pair collapsing to one card is what lets the
+        # third-ranked exposure in. Every stacked card is one the detail pane
+        # lists -- the stack never shows a photo the detail view would not.
+        detail = application.photo_queries.similar_group(
+            {
+                "project_id": [self.project.project_id],
+                "group_id": [item["id"]],
+            }
+        )
+        member_ids = {int(member["id"]) for member in detail["members"]}
+        self.assertTrue(set(cover_ids) <= member_ids, member_ids)
+        # The detail pane still lists all four exposures; only the stack is
+        # capped, so the group does not lose a photo to the dedup.
+        self.assertEqual(sorted(member_ids), sorted([first, second, third, fourth]))
+
+    def test_a_group_whose_members_share_one_capture_still_leads_with_a_cover(
+        self,
+    ) -> None:
+        """The degenerate group keeps a cover, so the folder is never blank.
+
+        When every member of a group is another format of the same shot --
+        cleared by a minimum of two members, but one exposure -- the stack has
+        a single card. That is the floor, not a failure: `similarFolder`
+        indexes its stack unconditionally, so an empty `covers` list would
+        render a blank folder with no error anywhere.
+        """
+        with closing(connect_db(self.project.db_path)) as conn:
+            jpg = insert_photo(conn, "ONLY_6002.JPG")
+            raw = insert_photo(conn, "ONLY_6002.CR3", size=20_000_000)
+            rebuild_capture_variants(conn)
+            self.link(conn, jpg, raw, raw, "similar")
+            conn.commit()
+
+        item = self.application().photo_queries.similar_groups(
+            {"project_id": [self.project.project_id]}
+        )["items"][0]
+        self.assertEqual(item["count"], 1)
+        self.assertEqual(item["capture_count"], 2)
+        self.assertEqual([int(cover["id"]) for cover in item["covers"]], [jpg])
+
+    def test_cover_dedup_never_exceeds_the_four_slot_stack(self) -> None:
+        """Folding only removes rows, so the four-cover cap still holds.
+
+        `cover_ids` is truncated to four upstream; the dedup runs on top of
+        that list rather than re-slicing a longer one, so a group with more
+        exposures than slots still stacks at most four.
+        """
+        with closing(connect_db(self.project.db_path)) as conn:
+            names = [f"MANY_600{index}.JPG" for index in range(3, 10)]
+            photos = [insert_photo(conn, name) for name in names]
+            # Every member its own exposure: no folding is possible at all.
+            rebuild_capture_variants(conn)
+            for left, right in zip(photos, photos[1:]):
+                self.link(conn, left, right, photos[0], "similar")
+            conn.commit()
+
+        item = self.application().photo_queries.similar_groups(
+            {"project_id": [self.project.project_id]}
+        )["items"][0]
+        self.assertEqual(item["capture_count"], 7)
+        self.assertEqual(item["count"], 7)
+        self.assertEqual(len(item["covers"]), 4)
+        self.assertEqual(
+            sorted(int(cover["id"]) for cover in item["covers"]),
+            sorted(photos[:4]),
+        )
+
+
+class SimilarSidebarCaptionTests(unittest.TestCase):
+    """The folder caption describes what the group actually holds.
+
+    ``count`` is the number of cards and ``capture_count`` the number of
+    files. They part company once a similar group folds a RAW into its JPEG,
+    and a group of two files from one exposure then shows a single card --
+    where "1 张相似照片" claims a comparison the group does not contain.
+
+    These tests run the real ``web/js/similar.js`` through Node rather than
+    matching its text: the wording is the requirement, so asserting that a
+    string appears in the source would pass just as happily when the branch
+    that uses it is dead.
+    """
+
+    SCRIPT = """
+    // Load similar.js the way the browser does -- no module system, so every
+    // top-level declaration shares one scope -- and export the caption.
+    const fs = require("fs");
+    const path = process.argv[1];
+    const source = fs.readFileSync(path, "utf8");
+    global.esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+    global.state = { similar: { selectedId: "" } };
+    const src = source + `
+;module.exports = { similarFolderCaption, similarFolder };
+`;
+    const module_ = { exports: {} };
+    new Function("module", "exports", "require", src)(
+      module_, module_.exports, require,
+    );
+    global.__similar = module_.exports;
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.node = shutil.which("node")
+        if not cls.node:
+            raise unittest.SkipTest("需要 node 才能执行 similar.js 的文案逻辑")
+        cls.web = Path(__file__).parents[1] / "web" / "js" / "similar.js"
+        cls.harness = Path(tempfile.mkdtemp()) / "similar-harness.js"
+        cls.harness.write_text(cls.SCRIPT, encoding="utf-8")
+
+    def run_similar(self, body: str) -> dict[str, Any]:
+        """Execute ``body`` with ``__similar`` in scope; return its JSON result."""
+        script = f"require({str(self.harness)!r});\n{body}\n"
+        completed = subprocess.run(
+            [self.node, "-e", script, str(self.web)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if completed.returncode != 0:
+            self.fail(f"harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    @staticmethod
+    def payload(count: int, capture_count: int, kind: str = "similar") -> str:
+        """A minimal group shaped like the sidebar's."""
+        return json.dumps(
+            {
+                "id": "sg-1",
+                "count": count,
+                "capture_count": capture_count,
+                "kind": kind,
+                "status": "untouched",
+                "decided_count": 0,
+                "recommended_id": 1,
+                "recommended": {"id": 1, "relative_path": "shot/AAA_1.JPG"},
+                "covers": [
+                    {"id": 1, "thumb_url": "/api/thumb?id=1", "format_category": "jpeg"}
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    def test_a_group_folded_to_one_card_is_not_called_one_similar_photo(
+        self,
+    ) -> None:
+        """count==1 must not produce "N 张相似照片".
+
+        Reverse proof: with the branch removed the caption is the old
+        template's output verbatim, so the first assertion fails rather than
+        the test merely going quiet.
+        """
+        result = self.run_similar(
+            f"""
+            const c = __similar.similarFolderCaption;
+            console.log(JSON.stringify({{
+              one: c({self.payload(1, 2)}),
+              two: c({self.payload(2, 2)}),
+              five: c({self.payload(5, 6)}),
+            }}));
+            """
+        )
+        self.assertNotIn("相似照片", result["one"])
+        self.assertEqual(result["one"], "同一张照片的 2 个文件")
+        # The count of files is what makes the line informative.
+        self.assertIn("2", result["one"])
+        # Multi-card groups keep the wording users already know.
+        self.assertEqual(result["two"], "2 张相似照片")
+        self.assertEqual(result["five"], "5 张相似照片")
+
+    def test_exact_groups_keep_their_own_wording(self) -> None:
+        """Byte-identical copies really are N photos; nothing changes there.
+
+        A one-card exact group is not reachable -- the minimum that creates a
+        group is two members and exact groups never fold -- but the branch is
+        pinned anyway so a reordered condition cannot quietly re-route it.
+        """
+        result = self.run_similar(
+            f"""
+            const c = __similar.similarFolderCaption;
+            console.log(JSON.stringify({{
+              exactTwo: c({self.payload(2, 2, "exact")}),
+              exactOne: c({self.payload(1, 1, "exact")}),
+            }}));
+            """
+        )
+        self.assertEqual(result["exactTwo"], "完全重复")
+        self.assertEqual(result["exactOne"], "完全重复")
+
+    def test_a_degenerate_payload_falls_back_to_the_plain_wording(self) -> None:
+        """capture_count below 2 cannot happen; it must not print anyway.
+
+        A group needs two members to exist, so `count==1` with a single file
+        is not a state the server can produce. If it ever did, "同一张照片的
+        1 个文件" would be a worse lie than the plain caption.
+        """
+        result = self.run_similar(
+            f"""
+            const c = __similar.similarFolderCaption;
+            console.log(JSON.stringify({{
+              oneFile: c({self.payload(1, 1)}),
+              missing: c({self.payload(1, 0)}),
+            }}));
+            """
+        )
+        self.assertEqual(result["oneFile"], "1 张相似照片")
+        self.assertEqual(result["missing"], "1 张相似照片")
+
+    def test_the_folder_template_actually_renders_the_caption(self) -> None:
+        """The function is wired in, not merely defined.
+
+        Reverse proof: a caption that is correct but unused still passes the
+        three tests above, so the rendered markup is what proves the change
+        reached the screen. The card count beside the stack is deliberately
+        left alone -- it counts cards, and one card is the truth.
+        """
+        result = self.run_similar(
+            f"""
+            const group = {self.payload(1, 2)};
+            const html = __similar.similarFolder(group);
+            console.log(JSON.stringify({{
+              html,
+              hasCaption: html.includes("同一张照片的 2 个文件"),
+              hasOldWording: html.includes("1 张相似照片"),
+            }}));
+            """
+        )
+        self.assertTrue(result["hasCaption"], result["html"])
+        self.assertFalse(result["hasOldWording"], result["html"])
+        # The stack chip still reports the card count.
+        self.assertIn("<i>1 张</i>", result["html"])
 
 
 if __name__ == "__main__":

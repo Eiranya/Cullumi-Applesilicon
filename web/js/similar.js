@@ -46,6 +46,31 @@ function syncSimilarStatusHint(total) {
   hint.textContent = total ? `${total} 组「${label}」` : `没有「${label}」的相似组`;
 }
 
+// Caption under a folder in the sidebar.
+//
+// `count` is the number of CARDS the group shows and `capture_count` the
+// number of FILES behind them. They differ only for a "similar" group, whose
+// members are folded to one card per exposure -- so a group can hold several
+// files and still show a single photo. "1 张相似照片" would then be a claim
+// about similarity that isn't there: nothing is being compared to anything,
+// the files are one shot. Those groups are captioned by what they actually
+// are, and `capture_count` is what makes the line informative rather than
+// just different.
+//
+// Exact groups keep their own wording: byte-identical copies really are N
+// photos, and folding them would be the bug, not the fix.
+function similarFolderCaption(group) {
+  if (group.kind === "exact") return "完全重复";
+  const count = Number(group.count) || 0;
+  if (count !== 1) return `${group.count} 张相似照片`;
+  const files = Number(group.capture_count) || 0;
+  // A one-member group cannot satisfy the two-member minimum that creates a
+  // group at all, so `files` below 2 means the payload is not what this
+  // branch assumes. Fall back to the plain wording instead of printing
+  // "同一张照片的 1 个文件".
+  return files > 1 ? `同一张照片的 ${files} 个文件` : "1 张相似照片";
+}
+
 function similarFolder(group, compact = false) {
   const coverImages = group.covers
     .map(
@@ -56,7 +81,7 @@ function similarFolder(group, compact = false) {
     .join("");
   const name = group.recommended.relative_path.split("/").pop();
   const status = similarGroupStatusMeta(group);
-  return `<button class="similar-folder ${compact ? "compact" : ""} ${group.id === state.similar.selectedId ? "active" : ""}" data-similar-group="${group.id}"><span class="folder-stack">${coverImages}<i>${group.count} 张</i><em class="folder-status" data-status="${status.key}" title="${esc(status.hint)}">${status.label}</em></span><span class="folder-caption"><b title="${esc(group.recommended.relative_path)}">${esc(name)}</b><small>${group.kind === "exact" ? "完全重复" : `${group.count} 张相似照片`}</small></span></button>`;
+  return `<button class="similar-folder ${compact ? "compact" : ""} ${group.id === state.similar.selectedId ? "active" : ""}" data-similar-group="${group.id}"><span class="folder-stack">${coverImages}<i>${group.count} 张</i><em class="folder-status" data-status="${status.key}" title="${esc(status.hint)}">${status.label}</em></span><span class="folder-caption"><b title="${esc(group.recommended.relative_path)}">${esc(name)}</b><small>${similarFolderCaption(group)}</small></span></button>`;
 }
 function renderSimilarFolders() {
   const selected = !!state.similar.selectedId;
