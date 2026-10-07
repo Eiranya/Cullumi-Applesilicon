@@ -61,7 +61,7 @@ from .project_store import (
     safe_relative_path,
 )
 from .quarantine_service import (
-    apply_quarantine,
+    QuarantineRunner,
     quarantine_preview,
     restore_batch,
 )
@@ -98,6 +98,7 @@ GET_ROUTES = {
     "/api/motion/video": "api_motion_video",
     "/api/quarantine/preview": "api_quarantine_preview",
     "/api/quarantine/batches": "api_batches",
+    "/api/quarantine/progress": "api_quarantine_progress",
 }
 POST_ROUTES = {
     "/api/diagnostics/viewer": "api_diagnostics_viewer",
@@ -189,6 +190,10 @@ class ApplicationContext:
     face_analyzer: FaceAnalyzer | None = None
     photo_queries: PhotoQueryService | None = None
     analysis_runner: PhotoAnalysisRunner | PhotoAnalysisPool | None = None
+    # Background quarantine runner. Built on demand in __post_init__ so the
+    # existing positional construction sites (tests, app.py) keep working
+    # without having to pass it.
+    quarantine_runner: QuarantineRunner | None = None
 
     def __post_init__(self) -> None:
         runner = self.analysis_runner or getattr(
@@ -197,6 +202,12 @@ class ApplicationContext:
         if runner is not None:
             self.scanner.analysis_runner = runner
             object.__setattr__(self, "analysis_runner", runner)
+        if self.quarantine_runner is None:
+            object.__setattr__(
+                self,
+                "quarantine_runner",
+                QuarantineRunner(self.manager, self.scanner.project_operation),
+            )
         if self.photo_queries is None:
             object.__setattr__(
                 self,
@@ -416,6 +427,12 @@ class Handler(BaseHTTPRequestHandler):
     @property
     def similarity_groups(self) -> SimilarityGroupCache:
         return self.application.similarity_groups
+
+    @property
+    def quarantine_runner(self) -> QuarantineRunner:
+        runner = self.application.quarantine_runner
+        assert runner is not None
+        return runner
 
     def log_message(self, format: str, *args: Any) -> None:
         if os.environ.get("CULLUMI_DEBUG"):
@@ -1124,12 +1141,38 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(result)
 
     def api_quarantine_apply(self, body: dict[str, Any]) -> None:
+        """Start a quarantine run and return its batch id without waiting.
+
+        The move itself happens on a background thread owned by
+        :class:`QuarantineRunner`, which holds the project-operation guard for
+        the whole run. Returning early is what lets the UI keep browsing: the
+        previous shape blocked this request until every file had been moved,
+        which froze the interface for the entire duration of the batch.
+
+        The similarity cache is invalidated by the poller once the run reports
+        ``done``, not here -- at this point nothing has moved yet.
+        """
         project_id = body["project_id"]
-        with self.scanner.project_operation(project_id, "隔离照片"):
-            with self.manager.data_operation(project_id):
-                result = apply_quarantine(self.manager.from_id(project_id))
-        self.similarity_groups.invalidate(project_id)
+        result = self.quarantine_runner.start(project_id)
         self._send_json(result)
+
+    def api_quarantine_progress(self) -> None:
+        pid = self._query().get("project_id", [""])[0]
+        progress = self.quarantine_runner.get_progress(pid)
+        # 何时该作废相似连拍缓存：只要「这一批动过文件」。
+        #
+        # 不能只看 stage == "complete"：run_quarantine_batch 在所有文件搬完、
+        # photos 表已更新之后才调 rebuild_capture_variants 与 _write_manifest_csv，
+        # 这两处任一抛异常都会记 stage="error"。那时文件已经不在磁盘上了，
+        # 缓存若不作废就会长期描述一批不存在的照片。
+        #
+        # 也不能只看 idle 载荷的 done（它同样为真）——从未隔离过的项目会被
+        # 每次轮询都清一次缓存。moved_any 只在真的搬动过文件时才为真，
+        # 因此它同时满足两侧：搬完后失败要作废，搬动前失败（project_operation
+        # 被占、批次目录建不出来，一个文件都没动）不作废。
+        if progress.get("moved_any") or progress.get("stage") == "complete":
+            self.similarity_groups.invalidate(pid)
+        self._send_json(progress)
 
     def api_restore(self, body: dict[str, Any]) -> None:
         project_id = body["project_id"]

@@ -60,7 +60,10 @@ fi
 #                                 optional &w= supply width on /api/photo so the
 #                                 viewer loads a preview and fetches the
 #                                 original only on request; expose the viewer
-#                                 wheel-sensitivity defaults on /api/bootstrap
+#                                 wheel-sensitivity defaults on /api/bootstrap;
+#                                 /api/quarantine/apply now starts a background
+#                                 run and returns its batch id, and the new
+#                                 GET /api/quarantine/progress reports it
 # cullumi/media.py                RAW EXIF from the TIFF IFD chain; display
 #                                 preview encoded 4:4:4 (Pillow defaults to
 #                                 4:2:0 for large images, halving chroma), with
@@ -71,6 +74,19 @@ fi
 # cullumi/native_dialogs.py       macOS file dialogs via pywebview
 # cullumi/photo_query_service.py  expose similarity-group processing status;
 #                                 per-photo preview_url alongside photo_url
+# cullumi/quarantine_service.py  quarantine runs on a background thread with a
+#                                 pollable progress record (total / current /
+#                                 current_file / moved / failed), so the UI can
+#                                 show a progress bar instead of freezing for
+#                                 the length of the batch. apply_quarantine()
+#                                 keeps its old synchronous signature and return
+#                                 value; the per-item error tolerance is
+#                                 unchanged (one failure records
+#                                 status="error" and the run continues, with no
+#                                 rollback) -- the only addition to the result is
+#                                 a separate `failed` count, because `skipped`
+#                                 conflated "never eligible" with "move failed"
+#                                 and a partly-failed batch read as a clean one
 # cullumi/settings_service.py     accept blink_gpu_enabled in the settings route;
 #                                 validate + persist the viewer wheel sensitivities
 #                                 and input-device choice
@@ -103,10 +119,17 @@ fi
 #                                 original, 0 fits the window. The `1` key that
 #                                 used to toggle 1:1 was withdrawn (owner ruling);
 #                                 1:1 now arrives only via 查看原图's auto-land
-# web/js/gallery.js               refresh the group badge after a decision
+# web/js/gallery.js               refresh the group badge after a decision;
+#                                 the viewer-facing library paging (return
+#                                 value + token invalidation on refilter) and
+#                                 the prominent "已加载 N / 共 M" indicator;
+#                                 quarantine now starts a background task and
+#                                 polls its progress instead of blocking
 # web/js/runtime.js               statusFilter in the shared view state; the
 #                                 viewer's display-tier bookkeeping (mounted
-#                                 tier, in-flight tier, debounce handle)
+#                                 tier, in-flight tier, debounce handle) and
+#                                 the viewer paging state (pending advance,
+#                                 page token, in-flight flag)
 # web/js/session.js               GPU status on boot; drop accept/reject entry
 #                                 points; restore the wheel-sensitivity sliders
 #                                 and input-device picker on boot
@@ -126,6 +149,14 @@ fi
 #                                 device, with the two sensitivities persisted in
 #                                 settings and the view buttons' active state
 #                                 synced.
+#                                 Paging: openViewer no longer wraps a forward
+#                                 out-of-range index with a modulo, so reaching
+#                                 the end of the loaded slice pages forward
+#                                 instead of snapping back to photo 1.
+#                                 "Previous" still wraps (owner ruling). The
+#                                 position readout reports the library total
+#                                 rather than the loaded count, which would
+#                                 otherwise claim "5 / 5" mid-scroll.
 #                                 .gitignore: the preview-resolution investigation's
 #                                 raw measurements (11 JSON files) are kept, the
 #                                 per-item PNG renders are not -- they are
@@ -144,6 +175,7 @@ cullumi/http_api.py
 cullumi/media.py
 cullumi/native_dialogs.py
 cullumi/photo_query_service.py
+cullumi/quarantine_service.py
 cullumi/settings_service.py
 cullumi/similarity.py
 cullumi/updates.py

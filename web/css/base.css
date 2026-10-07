@@ -398,6 +398,75 @@ nav button.active em {
   transform-origin:left center
 }
 
+/* 「已加载 N / 共 M」在还没取完时高亮。
+   每批量不变，但这个计数必须显眼：它正是「库里还有多少张没读进来」的唯一
+   可见线索，而末尾自动续页（viewer.js 的 continueViewerPage）也依赖用户
+   能预先知道后面还有照片。 */
+#viewSubtitle.is-partial {
+  color: var(--pink);
+  font-weight: 600
+}
+
+/* 隔离进度浮条：右下角。
+   隔离是后台任务且刻意不锁界面（用户可以在隔离时继续浏览照片），所以进度
+   不能占据版面——放在右下角、宽度受限、pointer-events 只在按钮上打开，
+   避免挡住正在看的内容。 */
+.quarantine-progress {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 98;
+  width: 290px;
+  max-width: calc(100vw - 40px);
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+  box-shadow: 0 12px 32px #0003;
+  display: grid;
+  gap: 9px;
+  /* 默认不吃点击：浮在内容之上时仍可点到下面的照片。 */
+  pointer-events: none
+}
+
+.quarantine-progress-head b {
+  display: block;
+  font-size: 13px
+}
+
+.quarantine-progress-head span {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  /* 文件名可能很长，截断而不是把浮条撑宽。 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap
+}
+
+.quarantine-progress-done {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  /* 只有这一小块可交互，其余部分仍然穿透。 */
+  pointer-events: auto
+}
+
+.quarantine-progress-done button {
+  padding: 4px 10px;
+  font-size: 12px;
+  white-space: nowrap
+}
+
+/* 完成数秒后淡出。 */
+.quarantine-progress.is-fading {
+  opacity: 0;
+  transition: opacity .45s ease
+}
+
 @keyframes progress-indeterminate {
   0% { transform:translateX(-120%) scaleX(.45) }
   55% { transform:translateX(145%) scaleX(1) }

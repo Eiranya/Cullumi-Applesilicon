@@ -1087,11 +1087,15 @@ function renderViewerPhoto(p) {
 }
 function openViewer(i) {
   if (!state.items.length) return;
-  state.viewerIndex = (i + state.items.length) % state.items.length;
+  // 向后越界（上一张越过第一张）仍然循环到末尾：这是既有行为，用户已确认保留。
+  // 向前越界（下一张越过已加载末尾）**不回卷**——回卷正是「浏览完 120 张就跳回
+  // 第一张」那个毛病的成因。越界时返回 false，由调用方去判断是该续页还是该停住。
+  const target = i < 0 ? i + state.items.length : i;
+  if (target < 0 || target >= state.items.length) return false;
+  state.viewerIndex = target;
   const p = state.items[state.viewerIndex];
   renderViewerPhoto(p);
-  $("#viewerIndex").textContent =
-    `${state.viewerIndex + 1} / ${state.items.length}`;
+  syncViewerSubtitle();
   if (!$("#viewer").open) $("#viewer").showModal();
   // 位图解码完成后才知道 naturalWidth / offsetWidth，状态提示要等这一刻，
   // 换源判定同样要等：此刻才知道「首屏这张 2048px 的图够不够铺满当前 scale」。
@@ -1105,6 +1109,19 @@ function openViewer(i) {
   };
   if (img.complete && img.naturalWidth) settled();
   else img.addEventListener("load", settled, { once: true });
+  return true;
+}
+// 查看器的位置指示：已加载到第几张 / 库里一共几张。
+//
+// 分母用 library.total 而不是 items.length：自动续页之后 items.length 会一直
+// 增长，用它当分母会让「第 121 张 / 共 121 张」这种自相矛盾的指示反复出现。
+// 不在照片库视图里（无法读取视图一次性取回全部）就退回原来的 items.length。
+function syncViewerSubtitle() {
+  const total =
+    state.view === "library" && state.library.total
+      ? state.library.total
+      : state.items.length;
+  $("#viewerIndex").textContent = `${state.viewerIndex + 1} / ${total}`;
 }
 // 「已载入原图」= <img> 当前挂的就是 photo_url 本身。
 //
@@ -1177,7 +1194,194 @@ function loadViewerOriginal() {
   clearTimeout(state.viewerTierTimer);
   syncViewerTier({ force: true });
 }
-const moveViewer = (d) => openViewer(state.viewerIndex + d);
+// 「下一张」走到已加载末尾时的处理：保持当前照片不动、显示转圈、续页，
+// 批次到达后再前进。
+//
+// 三个必须钉住的点：
+//  1. 连按只发一个请求（viewerPageLoading 合并），但按几次就等几步，
+//     否则用户的意图被吞掉。
+//  2. 到货时先核对代次（token）与预览是否还开着。对不上就只把新照片并进列表，
+//     绝不移动 viewerIndex——否则会跳到一张已经不在列表里的照片上。
+//     此时**不能**清空 viewerPendingAdvance：作废由关闭/换筛选那一侧负责，
+//     计数可能已属于作废之后新按的那一次。
+//  3. 「本次没发出去请求」（被去重挡下）与「真的失败」必须分开：前者在途的
+//     批次仍然会到，应当等它；后者才提示。混为一谈会谎报失败并吞掉按压。
+//  4. 失败或没有新照片时必须退出转圈并给提示，绝不停在「转圈」这个死状态里。
+//  5. 批次小于按压次数时前进到最远处，不越界、不回卷、也不沉默。
+function setViewerPagingIndicator(busy) {
+  const hint = $("#viewerPaging");
+  if (hint) hint.classList.toggle("hidden", !busy);
+}
+// 等一个批次落地，上限 VIEWER_PAGE_WAIT_LIMIT 次轮询。
+//
+// 覆盖两种「本次调用拿不到自己那批」的情形：
+//   join —— 调用前就已在途，loadLibraryPage 被去重直接返回（gallery.js:237），
+//           真的有一个批次在路上，等它即可；
+//   own  —— 本次调用自己发出了请求，而那个请求永不返回（NAS 挂起、网络黑洞）。
+//
+// 上限不是防御性冗余，而是「按钮不会彻底失灵」的唯一保证：无论哪条路径卡住，
+// viewerPageLoading 都必须在有限次轮询后释放。否则它被永久占住，之后每一次
+// 「下一张」都在 continueViewerPage 第一行被 return 掉，表现为按钮完全无反应，
+// 而 viewerPendingAdvance 还会无限累加。
+//
+// 返回 true 表示等到了（列表可能已更新），false 表示没等到。
+const VIEWER_PAGE_WAIT_LIMIT = 750; // 750 × 20ms = 15s，远大于任何正常批次
+const VIEWER_PAGE_POLL_MS = 20;
+// own 路径的竞速哨兵：到点即视为「没等到」。
+const VIEWER_PAGE_TIMEOUT = Symbol("viewer-page-timeout");
+async function waitForLibraryIdle() {
+  for (let waited = 0; waited < VIEWER_PAGE_WAIT_LIMIT; waited += 1) {
+    if (!state.library.loading) return true;
+    await wait(VIEWER_PAGE_POLL_MS);
+  }
+  return !state.library.loading;
+}
+// own 路径专用：把「请求自己永不返回」也纳入同一个上限。
+// 用与 join 路径同一个 VIEWER_PAGE_WAIT_LIMIT，而不是另一个数字——两条路径
+// 等待的是同一件事（这一批照片到不到），上限理应相同。
+//
+// settled 标志是必要的，不是优化，**删它看不出代价，因此必须写下来**。
+//
+// Promise.race 的落败方不会自己结束：即使 loadLibraryPage 先到，这个计时循环
+// 仍会跑满 750 次 × 20ms = 15s 才停。每次成功续页都会留下一条这样的孤儿
+// 定时器链，连续翻页时叠加。
+//
+// 实测代价（把 settled 去掉，ViewerPagingTests 九条）：14s → 111s。
+// 注意**断言全过**——这正是它危险的地方：测试不会红，只是 node 进程被
+// 未清空的定时器拖住不肯退出。这属于断言看不见的缺陷，只能靠耗时量化。
+// 如果哪天有人「清理」掉这个标志，请先重跑那九条测试看耗时。
+async function awaitLibraryPage() {
+  let settled = false;
+  const timeout = (async () => {
+    for (let waited = 0; waited < VIEWER_PAGE_WAIT_LIMIT; waited += 1) {
+      if (settled) return VIEWER_PAGE_TIMEOUT;
+      await wait(VIEWER_PAGE_POLL_MS);
+    }
+    return VIEWER_PAGE_TIMEOUT;
+  })();
+  try {
+    return await Promise.race([
+      loadLibraryPage(false).then((value) => {
+        settled = true;
+        return value;
+      }),
+      timeout,
+    ]);
+  } finally {
+    settled = true;
+  }
+}
+async function continueViewerPage(token) {
+  if (state.viewerPageLoading) return;
+  // 已经取完了就没有「下一张」可等：停在这里，不回卷。
+  // 这与「上一张」在第一张时循环到末尾并不冲突——那是另一个方向、另一种语义。
+  if (state.view !== "library" || state.library.done) {
+    state.viewerPendingAdvance = 0;
+    setViewerPagingIndicator(false);
+    toast("已经到底了");
+    return;
+  }
+  state.viewerPageLoading = true;
+  setViewerPagingIndicator(true);
+  const generation = state.library.generation;
+  const before = state.items.length;
+  // 调用前就已在途 = 这次调用不会拿到属于自己的那批，只能等在途的那批。
+  const joinsInflight = state.library.loading;
+  // timedOut 是「等到了上限仍没等到这一批」的唯一判据，join 与 own 两条路径共用。
+  let timedOut = false;
+  try {
+    // 两条路径都不得无界等待：join 走 waitForLibraryIdle，own 走 awaitLibraryPage
+    // 的竞速。哪条卡住都在上限后释放 viewerPageLoading 并如实告知。
+    if (joinsInflight) {
+      // 被去重挡下：本次调用没发请求，等在途的那批。
+      await loadLibraryPage(false);
+      timedOut = !(await waitForLibraryIdle());
+    } else {
+      // 自己发出的请求：同样加上限，NAS 挂起时不能把按钮永久钉死。
+      timedOut = (await awaitLibraryPage()) === VIEWER_PAGE_TIMEOUT;
+    }
+    // 代次失效 = 期间换了筛选条件、切了项目或换了视图。
+    // 批次已经并进列表（那是好事，滚动浏览也能用上），但不再替用户移动。
+    if (
+      token !== state.viewerPageToken ||
+      generation !== state.library.generation ||
+      !$("#viewer").open
+    ) {
+      // 这里**不能**清 viewerPendingAdvance：本次续页的意图早已作废，但计数
+      // 可能已经归入「作废之后新按的那一次」（关闭→重开→再按下一张）。
+      // 清掉等于替用户取消了新的一次按压。作废动作由关闭/换筛选那一侧负责。
+      return;
+    }
+    const added = state.items.length - before;
+    if (added <= 0) {
+      // 真的没拿到新照片。回到可操作状态并说明原因，不停在转圈这个死状态里。
+      state.viewerPendingAdvance = 0;
+      setViewerPagingIndicator(false);
+      if (timedOut) {
+        // 等到了上限也没等到那一批——join 与 own 两条路径共用这句「超时」。
+        // 刻意不写成「加载失败」：两者对用户的下一步动作要求不同。
+        toast("加载更多照片超时，请重试");
+      } else {
+        toast(state.library.done ? "已经到底了" : "加载更多照片失败，请重试");
+      }
+      return;
+    }
+    // 到货了：补齐用户在被加载期间按下的次数。
+    const steps = state.viewerPendingAdvance;
+    state.viewerPendingAdvance = 0;
+    state.viewerPageLoading = false;
+    setViewerPagingIndicator(false);
+    if (steps <= 0) return;
+    const target = state.viewerIndex + steps;
+    if (target < state.items.length) {
+      openViewer(target);
+      return;
+    }
+    // 批次比按压次数少（QA 缺陷 2）：前进到能前进的**最远处**。
+    // openViewer 对越界返回 false 本身是对的——那是去掉取模后必须有的行为；
+    // 但调用方不能把 false 当成「什么都没发生」而不作声，那会让用户卡在库的中段，
+    // 下一张看起来坏了、却没有半句解释。
+    const last = state.items.length - 1;
+    if (last > state.viewerIndex) openViewer(last);
+    toast(
+      state.library.done
+        ? "已经到底了"
+        : "已加载本次批次，继续按「下一张」可再取一批",
+    );
+  } catch (error) {
+    if (token === state.viewerPageToken) {
+      state.viewerPendingAdvance = 0;
+      setViewerPagingIndicator(false);
+      toast(`加载更多照片失败：${error.message}`);
+    }
+  } finally {
+    state.viewerPageLoading = false;
+    setViewerPagingIndicator(false);
+  }
+}
+function moveViewer(d) {
+  const target = state.viewerIndex + d;
+  if (target >= 0 && target < state.items.length) {
+    // 正常的步进。顺带把上一次可能残留的待前进计数清掉：它是属于上一次
+    // 「下一张」的意图，跟着新一轮浏览走下去只会造成莫名其妙的跳。
+    state.viewerPendingAdvance = 0;
+    setViewerPagingIndicator(false);
+    openViewer(target);
+    return;
+  }
+  if (d < 0) {
+    // 「上一张」在第一张时循环到最后一张：既有行为，用户已确认保留。
+    // 这里也必须清掉待前进计数（QA 缺陷 3）：回卷是一次真实的向后移动，
+    // 残留的正向意图会在批次到货后把 viewer 反向拽走——方向与用户刚按的相反。
+    state.viewerPendingAdvance = 0;
+    setViewerPagingIndicator(false);
+    openViewer(state.items.length - 1);
+    return;
+  }
+  // d > 0 且已到已加载末尾。先记下这一次意图，再看要不要真的去续页。
+  state.viewerPendingAdvance += 1;
+  continueViewerPage(state.viewerPageToken);
+}
 
 function bindViewerEvents() {
   $("#viewerPrev").onclick = () => moveViewer(-1);
@@ -1204,6 +1408,12 @@ function bindViewerEvents() {
   });
   $("#viewer").addEventListener("close", () => {
     stopViewerMotion();
+    // 作废在途续页：预览已关，到货的批次只补列表，不能再把用户拽回查看器。
+    // 批次本身不取消——它已经发出的请求会正常完成并留在列表里。
+    state.viewerPageToken += 1;
+    state.viewerPendingAdvance = 0;
+    state.viewerPageLoading = false;
+    setViewerPagingIndicator(false);
     syncViewerDecisions().catch((error) => toast(error.message));
   });
   ["timeupdate", "play", "pause", "ended"].forEach((name) =>

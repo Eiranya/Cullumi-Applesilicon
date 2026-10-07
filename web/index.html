@@ -149,7 +149,7 @@
       <figcaption><div class="viewer-title-line"><span id="viewerBadge" class="viewer-badge hidden"></span><span id="viewerAnalysisBadge" class="viewer-badge hidden"></span><span id="viewerVariantBadge" class="viewer-variant-badge hidden"></span><b id="viewerName"></b></div><span id="viewerMeta"></span><span id="viewerScaleHint" class="viewer-scale-hint"></span><span id="viewerOriginalHint" class="viewer-original-hint"></span></figcaption>
     </figure>
     <button class="side next" id="viewerNext" aria-label="下一张"><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="#viewer-next"></use></svg></button>
-    <footer><div class="viewer-decision-group"><button id="viewerKeep" class="viewer-decision viewer-keep">W / ↑ 保留</button><span id="viewerIndex"></span><button id="viewerRemove" class="viewer-decision viewer-remove">S / ↓ 移除</button></div><div class="viewer-zoom-group" role="group" aria-label="查看方式"><button id="viewerFit" class="viewer-zoom" type="button" aria-label="适应窗口" title="适应窗口（0）">适应</button><button id="viewerOriginal" class="viewer-zoom" type="button" aria-label="载入原始文件" title="载入原图（F）">查看原图</button></div></footer>
+    <footer><div class="viewer-decision-group"><button id="viewerKeep" class="viewer-decision viewer-keep">W / ↑ 保留</button><span id="viewerIndex"></span><span id="viewerPaging" class="viewer-paging hidden" aria-live="polite">正在加载下一批…</span><button id="viewerRemove" class="viewer-decision viewer-remove">S / ↓ 移除</button></div><div class="viewer-zoom-group" role="group" aria-label="查看方式"><button id="viewerFit" class="viewer-zoom" type="button" aria-label="适应窗口" title="适应窗口（0）">适应</button><button id="viewerOriginal" class="viewer-zoom" type="button" aria-label="载入原始文件" title="载入原图（F）">查看原图</button></div></footer>
   </dialog>
 
   <dialog id="settings" class="panel-dialog">
@@ -343,6 +343,19 @@
     <button id="recentRemove" class="context-danger" role="menuitem">移除项目</button>
   </div>
   <div id="toast"></div>
+  <!-- 隔离进度浮条：贴在右下角，不占用照片库 / 查看器的版面。
+       完成后原地变成一行「完成：已隔离 N 张 · 撤销」，停留数秒再淡出。 -->
+  <div id="quarantineProgress" class="quarantine-progress hidden" role="status" aria-live="polite">
+    <div class="quarantine-progress-head">
+      <b id="quarantineProgressTitle">正在隔离</b>
+      <span id="quarantineProgressDetail"></span>
+    </div>
+    <div class="progress-track"><i id="quarantineProgressBar"></i></div>
+    <div id="quarantineProgressDone" class="quarantine-progress-done hidden">
+      <span id="quarantineProgressDoneText"></span>
+      <button id="quarantineUndoBtn" class="ghost">撤销</button>
+    </div>
+  </div>
   <script>window.APP_TOKEN="__APP_TOKEN__";window.ASSET_REVISION="__ASSET_REVISION__"</script>
   <script src="/static/js/runtime.js?v=__ASSET_REVISION__"></script>
   <script src="/static/js/gallery-tools.js?v=__ASSET_REVISION__"></script>

@@ -73,6 +73,21 @@ const state = {
   // the shared view state because it is what the scale hint reports on: the
   // hint must be able to say "still waiting for a sharper source" honestly.
   viewerTier: 0,
+  // 「下一张」走到已加载末尾时的续页状态。
+  //
+  // state.items 只装已加载的部分（每批 LIBRARY_PAGE_SIZE 张），所以末尾并不等于
+  // 末尾：库里还有 total - items.length 张没读进来。原来的 openViewer 对越界取模，
+  // 于是浏览到第 120 张就弹回第 1 张。
+  //
+  // 现在到末尾时保持当前照片不动、显示转圈、续页，到货后再前进一格。
+  // pending 记录用户在被加载期间又按了几次「下一张」——连续快按要合并成一次请求，
+  // 但到货后要补齐相应的步数，否则用户的意图会被吞掉。
+  viewerPendingAdvance: 0,
+  // 本次续页请求的代次。换筛选条件 / 切项目 / 关闭预览都会让它失效，
+  // 失效后到货的批次只更新列表，绝不移动 viewerIndex。
+  viewerPageToken: 0,
+  // 续页是否正在进行（用于合并重复请求）。
+  viewerPageLoading: false,
   // Tier index currently being fetched, or null when idle. Non-null also drives
   // the "细节加载中" state, so it must be set before the request goes out and
   // cleared on every exit path (success, stale, failure).

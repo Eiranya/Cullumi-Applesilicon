@@ -3,18 +3,20 @@ from __future__ import annotations
 import copy
 import csv
 import json
+import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
-from contextlib import closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
 from unittest import mock
 
 from PIL import Image
 
-from cullumi import http_api, media, project_store
+from cullumi import http_api, media, project_store, quarantine_service
 from cullumi.capture_variants import (
     active_variant_rows,
     format_category_counts,
@@ -4083,6 +4085,2448 @@ class SimilarSidebarCaptionTests(unittest.TestCase):
         self.assertFalse(result["hasOldWording"], result["html"])
         # The stack chip still reports the card count.
         self.assertIn("<i>1 张</i>", result["html"])
+
+
+class ViewerPagingTests(unittest.TestCase):
+    """The viewer pages forward instead of wrapping back to the first photo.
+
+    The complaint under test: browsing a367-card library, reaching the end of
+    the loaded page snapped back to photo 1. The cause was arithmetic, not a
+    data problem: ``openViewer`` wrapped any out-of-range index with
+    ``(i + n) % n``, and ``state.items`` only ever holds the *loaded* slice
+    (120 cards at a time), so the end of the slice was treated as the end of
+    the library.
+
+    The owner ruled: page forward automatically at the loaded end (no
+    confirmation click), keep the current photo plus a spinner while the batch
+    is in flight, and keep the existing "previous wraps from the first photo to
+    the last" behaviour untouched.
+
+    These drive the real ``viewer.js`` through a Node harness. A text assertion
+    ("the code no longer contains %") passes just as happily when the paging
+    logic is wrong, so the behaviour is executed instead.
+    """
+
+    SCRIPT = """
+    const fs = require("fs");
+    const path = process.argv[1];
+    const source = fs.readFileSync(path, "utf8");
+
+    const listeners = new Map();
+    function makeEl(id) {
+      return {
+        id,
+        naturalWidth: 0,
+        naturalHeight: 0,
+        offsetWidth: 0,
+        offsetHeight: 0,
+        complete: true,
+        style: {},
+        dataset: {},
+        classList: {
+          _s: new Set(),
+          add(c) { this._s.add(c); },
+          remove(c) { this._s.delete(c); },
+          contains(c) { return this._s.has(c); },
+          toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); },
+        },
+        _attrs: {},
+        get src() { return this._attrs.src ?? ""; },
+        set src(v) { this._attrs.src = v; },
+        getAttribute(k) { return this._attrs[k] ?? null; },
+        setAttribute(k, v) { this._attrs[k] = v; },
+        addEventListener(ev, fn) {
+          const key = this.id + ":" + ev;
+          if (!listeners.has(key)) listeners.set(key, []);
+          listeners.get(key).push(fn);
+        },
+        removeEventListener() {},
+        getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
+        parentElement: null,
+        focus() {},
+        open: true,
+        showModal() { this.open = true; },
+        close() { this.open = false; },
+        pause() {},
+        play() {},
+        load() {},
+        removeAttribute(k) { delete this._attrs[k]; },
+        querySelector() { return null; },
+        querySelectorAll() { return []; },
+        appendChild() {},
+        removeChild() {},
+        insertBefore() {},
+        contains() { return false; },
+        set textContent(v) { this._text = String(v ?? ""); },
+        get textContent() { return this._text ?? ""; },
+        set innerHTML(v) { this._html = String(v ?? ""); },
+        get innerHTML() { return this._html ?? ""; },
+      };
+    }
+    const els = new Map();
+    function $(sel) {
+      const id = sel.replace(/^#/, "");
+      if (!els.has(id)) {
+        const el = makeEl(id);
+        el.parentElement = makeEl(id + "-parent");
+        el.parentElement.clientWidth = 1521;
+        el.parentElement.clientHeight = 1013;
+        els.set(id, el);
+      }
+      return els.get(id);
+    }
+    const $$ = () => [];
+    const toasts = [];
+    const toast = (m) => toasts.push(m);
+    // The appended module scope cannot see these two consts, so the helper
+    // that needs them (the close-event driver) reads them from here.
+    globalThis.__els = els;
+    globalThis.__viewerListeners = listeners;
+
+    global.$ = $;
+    global.$$ = $$;
+    global.toast = toast;
+    global.toasts = toasts;
+    global.window = { devicePixelRatio: 1 };
+    // bindViewerEvents (called by the close-race test so the real handler is
+    // registered) attaches resize / mousemove / mouseup to window, and
+    // #libraryBackToTop's click path calls matchMedia. Without these the
+    // production wiring cannot be exercised at all.
+    global.window.addEventListener = () => {};
+    global.window.removeEventListener = () => {};
+    global.window.matchMedia = () => ({ matches: false });
+    global.document = { querySelector: $ };
+    // Helpers viewer.js borrows from runtime.js when it renders a photo. The
+    // tier harness never reached renderViewerPhoto, so it did not need them.
+    global.formatSize = (n) => `${Math.round((n || 0) / 1024)} KB`;
+    global.wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    // gallery.js helper the viewer calls to render the capture-variant badge.
+    global.variantFormatText = () => "";
+    // viewer.js asks the shared state whether a folded variant is involved.
+    global.isFoldedVariant = () => false;
+    // The real close handler ends by syncing decisions (a gallery.js
+    // function). Resolving it is enough: the test is about the token, not
+    // about what happens to pending decisions afterwards.
+    global.syncViewerDecisions = async () => {};
+    global.state = {
+      viewerIndex: 0,
+      items: [],
+      view: "library",
+      library: { offset: 0, total: 0, done: false, loading: false, generation: 0 },
+      viewerMotion: { active: false },
+      viewerTransform: { scale: 1, x: 0, y: 0, dragging: false },
+      viewerTier: 0,
+      viewerTierPending: null,
+      viewerTierAutoOneToOne: false,
+      viewerTierTimer: null,
+      viewerOriginalFailed: new Set(),
+      viewerClickTimer: null,
+      viewerPageToken: 0,
+      viewerPendingAdvance: 0,
+      viewerPageLoading: false,
+    };
+    // The paging continuation calls loadLibraryPage (gallery.js) which is not
+    // loaded here. Tests script its behaviour through __pageResult.
+    //
+    // The delay is deliberate and load-bearing: the real fetch is genuinely
+    // asynchronous, and "press next three times while the batch is in flight"
+    // only means anything if there IS an in-flight window. A stub that
+    // resolved synchronously would grow state.items before the second press
+    // ever ran, so every press would be an ordinary step and the coalescing
+    // behaviour could never be observed.
+    global.__pageCalls = 0;
+    global.__pageDelayMs = 5;
+    // The viewer renders a fair few fields off each photo (relative_path for the
+    // name line, media_type for the motion branch, ...). A bare {id} object
+    // makes renderViewerPhoto throw before the paging logic is ever reached,
+    // so seed with the minimum a real payload carries.
+    const mkPhoto = (id) => ({
+      id,
+      relative_path: "trip/IMG_" + String(id).padStart(4, "0") + ".JPG",
+      media_type: "image",
+      width: 4000,
+      height: 3000,
+      size: 2000000,
+      decision: "undecided",
+      suggestion: "keep",
+      format_category: "jpeg",
+      photo_url: "/api/photo?id=" + id,
+      preview_url: "/api/photo?id=" + id + "&w=2048",
+      error: "",
+    });
+    global.__mkPhoto = mkPhoto;
+    global.__pageResult = { added: 0, done: false, fail: false };
+    global.loadLibraryPage = async () => {
+      global.__pageCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, global.__pageDelayMs));
+      const r = global.__pageResult;
+      if (r.fail) throw new Error("network down");
+if (r.added > 0) {
+ const start = state.items.length;
+        for (let i = 0; i < r.added; i += 1) state.items.push(mkPhoto(start + i + 1));
+        state.library.offset += r.added;
+        // total is the backend's count of the whole result set: it does NOT
+        // grow as pages arrive, only offset does. Adding to it here would make
+        // the stub disagree with the real endpoint and quietly hide bugs.
+        state.library.done = state.library.offset >= state.library.total;
+      } else {
+        state.library.done = true;
+      }
+      return true;
+    };
+    global.__probes = [];
+    global.Image = class {
+      constructor() {
+        this.onload = null;
+        this.onerror = null;
+        this._src = "";
+        global.__probes.push(this);
+      }
+      set src(v) { this._src = v; }
+      get src() { return this._src; }
+      addEventListener() {}
+      removeEventListener() {}
+    };
+
+    const src = source + `
+;var __exports = {
+  viewerPickTier, viewerNeededPixels, viewerBitmapPixels, viewerTierUrl,
+  viewerTierWidth, viewerTierLabel, syncViewerTier, loadViewerTier,
+  renderViewerScaleHint, viewerIsSourcingDetail, viewerAtPixelCeiling,
+  viewerNeedsBetterSource, viewerIsOneToOne, applyViewerTransform,
+  resetViewerTransform, loadViewerOriginal,
+  viewerShowingOriginal, viewerBitmapBelowSource, viewerOneToOneScale,
+  syncViewerOriginalState, renderViewerZoomState,
+  viewerWheelPixels, viewerWheelDeviceKind,
+  viewerWheelDevice, viewerWheelSensitivity, viewerWheelZoomFactor,
+  resetViewerWheelSession, zoomViewer,
+  openViewer, moveViewer, continueViewerPage, syncViewerSubtitle,
+  bindViewerEvents,
+  VIEWER_TIER_WIDTHS, VIEWER_TIER_HYSTERESIS, VIEWER_TIER_FAILED,
+  VIEWER_WHEEL_BASE, VIEWER_WHEEL_REFERENCE_NOTCH_PX, VIEWER_WHEEL_ZOOM_PER_NOTCH,
+  VIEWER_WHEEL_LINE_PX, VIEWER_WHEEL_PAGE_PX, VIEWER_WHEEL_SESSION_GAP_MS,
+  VIEWER_WHEEL_MOUSE_DELTA_PX, VIEWER_WHEEL_TRACKPAD_DELTA_PX,
+  VIEWER_WHEEL_SENSITIVITY_MIN, VIEWER_WHEEL_SENSITIVITY_MAX,
+  // Late-bound: the object literal above is evaluated before module.exports is
+  // assigned, so it cannot read itself. The getter resolves at call time.
+  get _state() { return state; },
+  _seed: (n, total, done) => {
+    state.items = [];
+    for (let i = 0; i < n; i += 1) state.items.push(globalThis.__mkPhoto(i + 1));
+    state.library = {
+      offset: n, total: total ?? n, done: !!done, loading: false,
+      generation: state.library.generation,
+    };
+    state.viewerIndex = 0;
+    state.viewerPendingAdvance = 0;
+    state.viewerPageLoading = false;
+    state.viewerPageToken = 0;
+    $("#viewerPaging").classList.add("hidden");
+    toasts.length = 0;
+    global.__pageCalls = 0;
+  },
+  _setPage: (r) => { global.__pageResult = r; },
+  _toasts: () => toasts.slice(),
+  _indexText: () => $("#viewerIndex").textContent,
+  _pagingHidden: () => $("#viewerPaging").classList.contains("hidden"),
+  _fireViewerClose: () => {
+    // els / listeners live in the harness scope, not in this appended module
+    // scope, so reach them through the global copies stashed by the harness.
+    // The dialog element only exists in the map once something has queried it,
+    // hence the $() call rather than a bare map lookup.
+    $("#viewer").open = false;
+    (globalThis.__viewerListeners.get("viewer:close") || []).forEach((fn) => fn());
+  },
+  _probeCount: () => global.__probes.length,
+  _probeSrc: (i) => global.__probes[i].src,
+  _fireLoad: (i) => global.__probes[i].onload && global.__probes[i].onload(),
+  _fireError: (i) => global.__probes[i].onerror && global.__probes[i].onerror(),
+  _resetProbes: () => { global.__probes.length = 0; },
+};
+module.exports = __exports;
+`;
+    const module_ = { exports: {} };
+    new Function("module", "exports", "require", src)(
+      module_, module_.exports, require,
+    );
+    global.__viewer = module_.exports;
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.node = shutil.which("node")
+        if not cls.node:
+            raise unittest.SkipTest("需要 node 才能执行 viewer.js 的续页逻辑")
+        cls.web = Path(__file__).parents[1] / "web" / "js" / "viewer.js"
+        cls.harness = Path(tempfile.mkdtemp()) / "paging-harness.js"
+        cls.harness.write_text(cls.SCRIPT, encoding="utf-8")
+
+    def run_viewer(self, body: str) -> dict[str, Any]:
+        # The bodies use top-level `await`, which node refuses to mix with
+        # `require` (ERR_AMBIGUOUS_MODULE_SYNTAX). Wrapping in an async IIFE
+        # keeps the body readable instead of forcing every call site to
+        # spell out the same scaffolding.
+        #
+        # The IIFE is a fresh scope, so the body's bare `moveViewer` would not
+        # see viewer.js's top-level declarations. Aliasing them onto
+        # globalThis makes the body read like the production code it is
+        # exercising -- `moveViewer(1)` rather than `__viewer.moveViewer(1)`.
+        #
+        # Only the functions are aliased. `state` is deliberately NOT rebound:
+        # the harness closures (_seed, loadLibraryPage) already captured the
+        # original object, and rebinding the name here would give the body a
+        # different object than the one the harness mutates.
+        names = (
+            "openViewer",
+            "moveViewer",
+            "continueViewerPage",
+            "syncViewerSubtitle",
+            "bindViewerEvents",
+            "waitForLibraryIdle",
+        )
+        prelude = "".join(f"globalThis.{name} = __viewer.{name};\n" for name in names)
+        script = (
+            f"require({str(self.harness)!r});\n{prelude}"
+            f"(async () => {{\n{body}\n}})().catch((e) => {{\n"
+            f"  console.error(e && e.stack || e);\n"
+            f"  process.exit(1);\n}});\n"
+        )
+        completed = subprocess.run(
+            [self.node, "-e", script, str(self.web)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if completed.returncode != 0:
+            self.fail(f"node 执行失败：\n{completed.stderr}")
+        return json.loads(completed.stdout.strip().splitlines()[-1])
+
+    def test_next_at_loaded_end_pages_forward_instead_of_wrapping(self) -> None:
+        """Pressing next at card 3 of a 3-loaded/5-total library must not wrap.
+
+        Reverse proof: the old code did ``(i + n) % n``, which for i=3, n=3
+        yields 0 -- photo 1 again. The final assertion pins the index to 3
+        (unchanged during the wait) and then to 4 after the batch lands, so
+        restoring the modulo fails here instead of being merely unasserted.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(3, 5, false);
+            state.viewerIndex = 2;               // last loaded card
+            __viewer._setPage({ added: 2, done: false, fail: false });
+            const before = state.viewerIndex;
+            moveViewer(1);                        // triggers the continuation
+            const duringIndex = state.viewerIndex;
+            const duringSpinner = __viewer._pagingHidden();
+            await wait(60);                        // let the batch land
+            console.log(JSON.stringify({
+              before, duringIndex, duringSpinner,
+              after: state.viewerIndex,
+              pageCalls: global.__pageCalls,
+              items: state.items.length,
+            }));
+            """
+        )
+        # While the batch is in flight the current photo must stay put (Q9).
+        self.assertEqual(result["duringIndex"], 2, result)
+        self.assertFalse(result["duringSpinner"], "续页期间应显示转圈")
+        # After it lands, advance exactly one -- not back to 0.
+        self.assertEqual(result["after"], 3, result)
+        self.assertEqual(result["items"], 5, result)
+        self.assertEqual(result["pageCalls"], 1, result)
+
+    def test_repeated_next_presses_issue_one_request_and_advance_far_enough(self) -> None:
+        """Mashing next while a batch loads must not fire N requests.
+
+        Reverse proof: a naive implementation awaiting the load per press would
+        report pageCalls == 3 here. The assertion pins it to 1, and separately
+        pins that all three presses are honoured (index 2 -> 5), so swallowing
+        the user's intent fails just as loudly as duplicating the request.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(3, 9, false);
+            state.viewerIndex = 2;
+            __viewer._setPage({ added: 3, done: false, fail: false });
+            moveViewer(1);
+            moveViewer(1);
+            moveViewer(1);
+            const callsBefore = global.__pageCalls;
+            await wait(60);
+            console.log(JSON.stringify({
+              callsBefore,
+              calls: global.__pageCalls,
+              after: state.viewerIndex,
+            }));
+            """
+        )
+        self.assertEqual(result["calls"], 1, "连按多次只应触发一次续页请求")
+        self.assertEqual(result["after"], 5, result)
+
+    def test_closing_viewer_during_paging_does_not_move_the_photo(self) -> None:
+        """Close the preview mid-batch: the batch lands, the viewer stays put.
+
+        This is the race the owner called out. Without token invalidation the
+        late batch would advance a viewer the user had already dismissed --
+        and worse, against a list the user may since have refiltered.
+
+        The handler is registered for real (bindViewerEvents) rather than
+        simulated: a hand-rolled stand-in could pass while the production
+        close listener was never wired up at all.
+        """
+        result = self.run_viewer(
+            """
+            bindViewerEvents();          // register the genuine close handler
+            __viewer._seed(3, 6, false);
+            state.viewerIndex = 2;
+            __viewer._setPage({ added: 3, done: false, fail: false });
+            moveViewer(1);
+            __viewer._fireViewerClose(); // user dismisses the preview
+            await wait(60);
+            console.log(JSON.stringify({
+              after: state.viewerIndex,
+              items: state.items.length,
+              spinner: __viewer._pagingHidden(),
+              pending: state.viewerPendingAdvance,
+              token: state.viewerPageToken,
+            }));
+            """
+        )
+        self.assertEqual(result["after"], 2, "关闭预览后续页不应移动 viewerIndex")
+        self.assertEqual(result["spinner"], True, "关闭后必须退出转圈")
+        self.assertEqual(result["pending"], 0, result)
+        # The batch still landed in the list -- that part is wanted.
+        self.assertEqual(result["items"], 6, result)
+        # The token must have advanced, or a late batch would move the viewer.
+        self.assertGreater(result["token"], 0, "关闭预览必须作废续页代次")
+
+    def test_stale_token_after_refilter_does_not_move_the_photo(self) -> None:
+        """A filter change during paging invalidates the pending advance.
+
+        Reverse proof: loadView bumps viewerPageToken, which is what stands
+        between a late batch and a stale viewerIndex pointing into a list that
+        no longer exists.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(3, 6, false);
+            state.viewerIndex = 2;
+            __viewer._setPage({ added: 3, done: false, fail: false });
+            moveViewer(1);
+            state.viewerPageToken += 1;   // what loadView() does on refilter
+            await wait(60);
+            console.log(JSON.stringify({
+              after: state.viewerIndex,
+              spinner: __viewer._pagingHidden(),
+            }));
+            """
+        )
+        self.assertEqual(result["after"], 2, "换筛选条件后不得再自动前进")
+        self.assertEqual(result["spinner"], True, result)
+
+    def test_failed_page_request_exits_spinner_and_explains(self) -> None:
+        """A failed continuation must not strand the spinner.
+
+        Reverse proof: an implementation that swallowed the rejection and left
+        the indicator up would report spinner === false (i.e. still spinning)
+        and an empty toast list here.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(3, 6, false);
+            state.viewerIndex = 2;
+            __viewer._setPage({ added: 0, done: false, fail: true });
+            moveViewer(1);
+            await wait(60);
+            console.log(JSON.stringify({
+              after: state.viewerIndex,
+              spinner: __viewer._pagingHidden(),
+              toasts: __viewer._toasts(),
+            }));
+            """
+        )
+        self.assertEqual(result["spinner"], True, "失败后必须退出转圈")
+        self.assertEqual(result["after"], 2, result)
+        self.assertTrue(result["toasts"], "失败必须给出提示")
+
+    def test_empty_page_reports_no_more_rather_than_wrapping(self) -> None:
+        """A batch that comes back empty must stop, not wrap, and must say so."""
+        result = self.run_viewer(
+            """
+            __viewer._seed(3, 3, false);
+            state.viewerIndex = 2;
+            __viewer._setPage({ added: 0, done: true, fail: false });
+            moveViewer(1);
+            await wait(60);
+            console.log(JSON.stringify({
+              after: state.viewerIndex,
+              spinner: __viewer._pagingHidden(),
+              toasts: __viewer._toasts(),
+            }));
+            """
+        )
+        self.assertEqual(result["after"], 2, "没有更多时不得回卷")
+        self.assertEqual(result["spinner"], True, result)
+        self.assertTrue(any("到底" in t for t in result["toasts"]), result["toasts"])
+
+    def test_next_stops_immediately_when_library_is_exhausted(self) -> None:
+        """With done already true, next must not even attempt a request."""
+        result = self.run_viewer(
+            """
+            __viewer._seed(3, 3, true);
+            state.viewerIndex = 2;
+            __viewer._setPage({ added: 3, done: false, fail: false });
+            moveViewer(1);
+            await wait(60);
+            console.log(JSON.stringify({
+              calls: global.__pageCalls,
+              after: state.viewerIndex,
+              toasts: __viewer._toasts(),
+            }));
+            """
+        )
+        self.assertEqual(result["calls"], 0, "已取完时不应再发续页请求")
+        self.assertEqual(result["after"], 2, result)
+
+    def test_previous_still_wraps_from_first_to_last(self) -> None:
+        """Q8(a): previous at the first photo wraps to the last. Unchanged.
+
+        Reverse proof: the paging rewrite touched moveViewer, so the backward
+        direction needed pinning explicitly -- an implementation that returned
+        early on any out-of-range index would strand the user on photo 1.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(4, 4, true);
+            state.viewerIndex = 0;
+            moveViewer(-1);
+            console.log(JSON.stringify({
+              after: state.viewerIndex,
+              calls: global.__pageCalls,
+            }));
+            """
+        )
+        self.assertEqual(result["after"], 3, "上一张在第一张时必须循环到最后一张")
+        self.assertEqual(result["calls"], 0, result)
+
+    def test_viewer_counter_reports_library_total_not_loaded_count(self) -> None:
+        """The position readout must not claim "5 / 5" while more remain.
+
+        Reverse proof: with items grown by paging, the old
+        ``items.length`` denominator would render "5 / 5" -- asserting the
+        total here fails that.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(3, 9, false);
+            state.viewerIndex = 2;               // last loaded card
+            __viewer._setPage({ added: 2, done: false, fail: false });
+            moveViewer(1);                       // pages forward, then advances
+            await wait(60);
+            console.log(JSON.stringify({
+              indexText: __viewer._indexText(),
+              items: state.items.length,
+              total: state.library.total,
+            }));
+            """
+        )
+        self.assertIn("/ 9", result["indexText"], result)
+        self.assertEqual(result["items"], 5, result)
+
+
+class QuarantineProgressTests(unittest.TestCase):
+    """Quarantine reports progress while it runs instead of blocking.
+
+    The complaint under test: isolating a few hundred photos froze the whole
+    interface, because ``POST /api/quarantine/apply`` only returned once every
+    file had been moved. The owner ruled on a background thread plus polling,
+    and -- importantly -- on keeping the existing per-item error tolerance
+    exactly as it was: one file fails, the rest continue, no rollback.
+
+    These tests therefore pin two things at once: the progress advances to
+    completion, and the failure count is reported on its own rather than being
+    folded into ``skipped`` (which is what let a partly-failed run read as a
+    clean one).
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.photos = self.root / "photos"
+        self.photos.mkdir()
+        self.config = ConfigStore(self.root / "config.json")
+        self.config.data["default_cache_root"] = str(self.root / "cache")
+        self.config.save()
+        self.manager = ProjectManager(self.config)
+        self.project = self.manager.open(str(self.photos))
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def make_photo(
+        self, name: str, color: tuple[int, int, int] = (10, 20, 30)
+    ) -> None:
+        """Write a real file to disk.
+
+        Quarantine compares each row's recorded size/mtime against the file
+        before moving it, so a fixture that only inserted a database row would
+        make every photo ineligible (status "missing") and the run would
+        report zero moves while still looking successful.
+        """
+        path = self.photos / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (64, 48), color).save(path, quality=92)
+
+    def scan(self) -> None:
+        scanner = Scanner(self.config, self.manager)
+        scanner.start(self.project.project_id)
+        scanner.threads[self.project.project_id].join(60)
+        progress = scanner.progress[self.project.project_id]
+        self.assertEqual(progress["stage"], "complete", progress)
+
+    def prepare(self, names: list[str]) -> None:
+        """Create photos, scan them, then mark every one for removal."""
+        for index, name in enumerate(names):
+            self.make_photo(name, (10 + index * 7, 20, 30))
+        self.scan()
+        with closing(connect_db(self.project.db_path)) as conn:
+            conn.execute("UPDATE photos SET decision='remove'")
+            conn.commit()
+        with closing(connect_db(self.project.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM photos").fetchone()[0],
+                len(names),
+            )
+
+    def wait_for_progress(
+        self, runner: http_api.QuarantineRunner, project_id: str
+    ) -> dict[str, Any]:
+        """Poll until the run reports done, mirroring what the UI does."""
+        for _ in range(600):
+            progress = runner.get_progress(project_id)
+            if progress.get("done"):
+                return progress
+            time.sleep(0.02)
+        self.fail("隔离任务未在预期时间内完成")
+
+    def test_progress_advances_to_completion(self) -> None:
+        """Progress must climb from 0 to done with a final result attached.
+
+        Reverse proof: a runner that only flipped ``done`` with no ``current``
+        or ``result`` would satisfy "eventually done" but fail the mid-run and
+        final-result assertions below.
+        """
+        self.prepare([f"photo-{index}.jpg" for index in range(3)])
+        scanner = Scanner(self.config, self.manager)
+        runner = http_api.QuarantineRunner(self.manager, scanner.project_operation)
+        started = runner.start(self.project.project_id)
+        self.assertTrue(started["started"], started)
+        final = self.wait_for_progress(runner, self.project.project_id)
+        self.assertEqual(final["stage"], "complete", final)
+        self.assertEqual(final["batch_id"], started["batch_id"], final)
+        self.assertEqual(final["total"], 3, final)
+        self.assertEqual(final["current"], 3, final)
+        self.assertEqual(final["moved"], 3, final)
+        self.assertEqual(final["failed"], 0, final)
+        self.assertEqual(final["result"]["moved"], 3, final)
+        # Every file really moved, not merely counted.
+        for index in range(3):
+            self.assertFalse((self.photos / f"photo-{index}.jpg").exists())
+
+    def test_progress_reports_the_current_file_name(self) -> None:
+        """Q4(b): the payload carries the file being handled right now.
+
+        Asserted on the *synchronous* body via its ``report`` callback, because
+        a fast local run can finish before any poll observes an intermediate
+        frame -- the callback is the only place the per-item name is visible.
+        """
+        self.prepare(["only.jpg"])
+        seen: list[dict[str, Any]] = []
+        batch_id = "20260101-000000-testbatch"
+        manifest_path, batch_root, manifest, prepared = (
+            quarantine_service.prepare_quarantine_batch(self.project, batch_id)
+        )
+        result = quarantine_service.run_quarantine_batch(
+            self.project,
+            batch_id,
+            manifest_path,
+            batch_root,
+            manifest,
+            prepared,
+            seen.append,
+        )
+        self.assertEqual(result["moved"], 1, result)
+        # The first frame announces the total before any work starts.
+        self.assertEqual(seen[0]["total"], 1, seen[0])
+        self.assertEqual(seen[0]["current"], 0, seen[0])
+        # The last frame names the file it just handled.
+        self.assertEqual(seen[-1]["current"], 1, seen[-1])
+        self.assertEqual(seen[-1]["current_file"], "only.jpg", seen[-1])
+
+    def test_failure_count_is_reported_separately_from_skipped(self) -> None:
+        """Q13(b)'s direct consequence: a failed move must be visible.
+
+        Reverse proof: the original returned only ``moved`` and
+        ``skipped = total - moved``, so a run with one failure reported
+        ``skipped: 1`` with no way to tell a failure from a file that was
+        never eligible. Asserting ``failed == 1`` fails that.
+        """
+        self.prepare(["good-a.jpg", "boom.jpg", "good-b.jpg"])
+        real_move = shutil.move
+
+        # Fail by filename rather than by call ordinal: the run processes
+        # candidates in relative_path order (boom, good-a, good-b), so "the
+        # 2nd call" would silently start meaning whichever file sorts second.
+        def flaky_move(source, destination):
+            if "boom" in str(source):
+                raise OSError("simulated move failure")
+            return real_move(source, destination)
+
+        with mock.patch("cullumi.workflows.shutil.move", side_effect=flaky_move):
+            batch = apply_quarantine(self.project)
+        self.assertEqual(batch["moved"], 2, batch)
+        self.assertEqual(batch["failed"], 1, "失败数必须单独报出")
+        # skipped keeps its original meaning (everything that did not move) so
+        # existing callers are unaffected -- but failed is now distinguishable.
+        self.assertEqual(batch["skipped"], 1, batch)
+        # The failure is recorded in the manifest, and the run did not roll back.
+        with closing(connect_db(self.project.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT relative_path,status FROM photos ORDER BY relative_path"
+            ).fetchall()
+        statuses = {row["relative_path"]: row["status"] for row in rows}
+        self.assertEqual(statuses["boom.jpg"], "active", statuses)
+        self.assertEqual(statuses["good-a.jpg"], "quarantined", statuses)
+        self.assertEqual(statuses["good-b.jpg"], "quarantined", statuses)
+
+    def test_runner_reports_error_state_instead_of_hanging(self) -> None:
+        """A failing run must land in stage=error with done, not stay pending.
+
+        Otherwise the poller would spin on a task that will never finish.
+        """
+        self.prepare(["x.jpg"])
+
+        def boom(project_id, label):
+            raise ValueError("项目正在执行其他任务")
+
+        runner = http_api.QuarantineRunner(self.manager, boom)
+        runner.start(self.project.project_id)
+        final = self.wait_for_progress(runner, self.project.project_id)
+        self.assertEqual(final["stage"], "error", final)
+        self.assertTrue(final["done"], final)
+        self.assertIn("其他任务", final["error"], final)
+
+    def test_second_start_while_running_reuses_the_same_batch(self) -> None:
+        """Starting twice must not launch a second run on the same library."""
+        self.prepare(["y.jpg"])
+        scanner = Scanner(self.config, self.manager)
+        runner = http_api.QuarantineRunner(self.manager, scanner.project_operation)
+        first = runner.start(self.project.project_id)
+        second = runner.start(self.project.project_id)
+        self.wait_for_progress(runner, self.project.project_id)
+        self.assertFalse(second["started"], "并发隔离必须被拒绝")
+        self.assertEqual(second["batch_id"], first["batch_id"], second)
+        with closing(connect_db(self.project.db_path)) as conn:
+            batches = conn.execute("SELECT COUNT(*) FROM quarantine_batches").fetchone()[0]
+        self.assertEqual(batches, 1, batches)
+
+    def test_progress_endpoint_is_registered_and_idles_cleanly(self) -> None:
+        """The new GET route exists and answers idle before any run."""
+        self.assertIn("/api/quarantine/progress", http_api.GET_ROUTES)
+        self.assertEqual(
+            http_api.GET_ROUTES["/api/quarantine/progress"],
+            "api_quarantine_progress",
+        )
+        scanner = Scanner(self.config, self.manager)
+        runner = http_api.QuarantineRunner(self.manager, scanner.project_operation)
+        idle = runner.get_progress(self.project.project_id)
+        self.assertEqual(idle, {"stage": "idle", "done": True})
+
+    def test_apply_route_starts_instead_of_blocking(self) -> None:
+        """The apply route must hand back a batch id without finishing the work.
+
+        Reverse proof: the old handler awaited apply_quarantine and returned
+        ``moved``. Asserting on ``batch_id`` + ``started`` fails that, and
+        asserting the photos are NOT yet moved proves the route really returned
+        early rather than doing the work twice.
+        """
+        self.prepare(["z.jpg"])
+        application = http_api.ApplicationContext(
+            self.config,
+            self.manager,
+            Scanner(self.config, self.manager),
+            SimilarityGroupCache(),
+            "test-token",
+            Path("web"),
+        )
+        sent: list[dict[str, Any]] = []
+        context = application
+
+        class FakeHandler:
+            # Bound through the enclosing name: a class body cannot read the
+            # enclosing function's `application` on its own.
+            application = context
+
+            @property
+            def quarantine_runner(self):
+                return context.quarantine_runner
+
+            def _send_json(self, payload):
+                sent.append(payload)
+
+        http_api.Handler.api_quarantine_apply(
+            FakeHandler(), {"project_id": self.project.project_id}
+        )
+        self.assertEqual(len(sent), 1, sent)
+        self.assertIn("batch_id", sent[0], sent[0])
+        self.assertIn("started", sent[0], sent[0])
+        # The route returned before the move happened; the runner owns it now.
+        self.wait_for_progress(application.quarantine_runner, self.project.project_id)
+        self.assertFalse((self.photos / "z.jpg").exists())
+
+
+class ViewerPagingRaceQATests(unittest.TestCase):
+    """Independent QA pass on the viewer paging, written against the *races*.
+
+    The engineer covered the happy paths (page forward, coalesce, close,
+    refilter, fail, empty, exhausted, prev-wraps, counter). This class covers
+    the interleavings he did not, using a harness that resolves page requests
+    **manually** rather than on a timer. That distinction is load-bearing: with
+    a timer, "close the preview while the batch is in flight" is a race the
+    test may win or lose, and a test that only passes when it wins the race is
+    not a test. Here ``__pending`` holds the resolvers and the test decides the
+    exact moment -- and the exact size -- of every arrival.
+
+    The harness mirrors the real ``loadLibraryPage`` guards rather than a
+    convenient stub: it refuses to start while ``state.library.loading`` is
+    true and drops the batch when ``generation`` moved on. A permissive stub
+    would have hidden defect 1 below.
+    """
+
+    SCRIPT = """
+    const fs = require("fs");
+    const source = fs.readFileSync(process.env.QA_VIEWER, "utf8");
+
+    const listeners = new Map();
+    function makeEl(id) {
+      return {
+        id, naturalWidth: 0, naturalHeight: 0, offsetWidth: 0, offsetHeight: 0,
+        complete: true, style: {}, dataset: {},
+        classList: {
+          _s: new Set(),
+          add(c) { this._s.add(c); },
+          remove(c) { this._s.delete(c); },
+          contains(c) { return this._s.has(c); },
+          toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); },
+        },
+        _attrs: {},
+        get src() { return this._attrs.src ?? ""; },
+        set src(v) { this._attrs.src = v; },
+        getAttribute(k) { return this._attrs[k] ?? null; },
+        setAttribute(k, v) { this._attrs[k] = v; },
+        addEventListener(ev, fn) {
+          const key = id + ":" + ev;
+          if (!listeners.has(key)) listeners.set(key, []);
+          listeners.get(key).push(fn);
+        },
+        removeEventListener() {},
+        getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
+        parentElement: null, focus() {}, open: true,
+        showModal() { this.open = true; },
+        close() { this.open = false; },
+        pause() {}, play() {}, load() {},
+        removeAttribute(k) { delete this._attrs[k]; },
+        querySelector() { return null; },
+        querySelectorAll() { return []; },
+        appendChild() {}, removeChild() {}, insertBefore() {},
+        contains() { return false; },
+        set textContent(v) { this._text = String(v ?? ""); },
+        get textContent() { return this._text ?? ""; },
+        set innerHTML(v) { this._html = String(v ?? ""); },
+        get innerHTML() { return this._html ?? ""; },
+      };
+    }
+    const els = new Map();
+    function $(sel) {
+      const id = sel.replace(/^#/, "");
+      if (!els.has(id)) {
+        const el = makeEl(id);
+        el.parentElement = makeEl(id + "-parent");
+        el.parentElement.clientWidth = 1521;
+        el.parentElement.clientHeight = 1013;
+        els.set(id, el);
+      }
+      return els.get(id);
+    }
+    const $$ = () => [];
+    const toasts = [];
+    const toast = (m) => toasts.push(m);
+    globalThis.__els = els;
+    globalThis.__viewerListeners = listeners;
+
+    global.$ = $;
+    global.$$ = $$;
+    global.toast = toast;
+    global.toasts = toasts;
+    global.window = { devicePixelRatio: 1 };
+    global.window.addEventListener = () => {};
+    global.window.removeEventListener = () => {};
+    global.window.matchMedia = () => ({ matches: false });
+    global.document = { querySelector: $ };
+    global.formatSize = (n) => `${Math.round((n || 0) / 1024)} KB`;
+    global.wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    global.variantFormatText = () => "";
+    global.isFoldedVariant = () => false;
+    global.syncViewerDecisions = async () => {};
+    global.state = {
+      viewerIndex: 0, items: [], view: "library",
+      library: { offset: 0, total: 0, done: false, loading: false, generation: 0 },
+      viewerMotion: { active: false },
+      viewerTransform: { scale: 1, x: 0, y: 0, dragging: false },
+      viewerTier: 0, viewerTierPending: null, viewerTierAutoOneToOne: false,
+      viewerTierTimer: null, viewerOriginalFailed: new Set(),
+      viewerClickTimer: null,
+      viewerPageToken: 0, viewerPendingAdvance: 0, viewerPageLoading: false,
+    };
+    const mkPhoto = (id) => ({
+      id,
+      relative_path: "trip/IMG_" + String(id).padStart(4, "0") + ".JPG",
+      media_type: "image", width: 4000, height: 3000, size: 2000000,
+      decision: "undecided", suggestion: "keep", format_category: "jpeg",
+      photo_url: "/api/photo?id=" + id,
+      preview_url: "/api/photo?id=" + id + "&w=2048",
+      error: "",
+    });
+    globalThis.__mkPhoto = mkPhoto;
+
+    // Manual page requests. __pending collects one resolver per in-flight
+    // call; the test releases them explicitly and chooses the batch size with
+    // __nextAdded.
+    globalThis.__pending = [];
+    globalThis.__nextAdded = 0;
+    globalThis.__pageCalls = 0;
+    global.loadLibraryPage = async () => {
+      // Faithful to gallery.js:237 -- a second call while one is in flight
+      // returns immediately without fetching anything.
+      if (state.library.loading) return;
+      globalThis.__pageCalls += 1;
+      const generation = state.library.generation;
+      state.library.loading = true;
+      await new Promise((resolve) => {
+        globalThis.__pending.push(() => {
+          state.library.loading = false;
+          // Faithful to gallery.js:259 -- a batch from a dead generation is
+          // dropped rather than merged into the new list.
+          if (generation !== state.library.generation) { resolve(true); return; }
+          const n = globalThis.__nextAdded;
+          for (let i = 0; i < n; i += 1) {
+            state.items.push(mkPhoto(state.items.length + 1));
+          }
+          state.library.offset += n;
+          state.library.done = state.library.offset >= state.library.total;
+          resolve(true);
+        });
+      });
+    };
+    globalThis.__releaseAll = () => {
+      const queued = globalThis.__pending.slice();
+      globalThis.__pending.length = 0;
+      queued.forEach((fn) => fn());
+    };
+    globalThis.__probes = [];
+    global.Image = class {
+      constructor() {
+        this.onload = null; this.onerror = null; this._src = "";
+        globalThis.__probes.push(this);
+      }
+      set src(v) { this._src = v; }
+      get src() { return this._src; }
+      addEventListener() {}
+      removeEventListener() {}
+    };
+
+    const src = source + `
+;var __exports = {
+  openViewer, moveViewer, continueViewerPage, syncViewerSubtitle, bindViewerEvents,
+  get _state() { return state; },
+  _seed: (n, total, done) => {
+    state.items = [];
+    for (let i = 0; i < n; i += 1) state.items.push(globalThis.__mkPhoto(i + 1));
+    state.library = {
+      offset: n, total: total ?? n, done: !!done, loading: false,
+      generation: state.library.generation,
+    };
+    state.viewerIndex = 0;
+    state.viewerPendingAdvance = 0;
+    state.viewerPageLoading = false;
+    state.viewerPageToken = 0;
+    $("#viewerPaging").classList.add("hidden");
+    toasts.length = 0;
+    globalThis.__pending.length = 0;
+    globalThis.__pageCalls = 0;
+  },
+  _toasts: () => toasts.slice(),
+  _pagingHidden: () => $("#viewerPaging").classList.contains("hidden"),
+  _indexText: () => $("#viewerIndex").textContent,
+  _viewerOpen: () => $("#viewer").open,
+  _fireClose: () => {
+    $("#viewer").open = false;
+    (globalThis.__viewerListeners.get("viewer:close") || []).forEach((fn) => fn());
+  },
+  // Close the preview (through the genuine handler) and open another photo.
+  _closeAndOpen: (i) => {
+    $("#viewer").open = false;
+    (globalThis.__viewerListeners.get("viewer:close") || []).forEach((fn) => fn());
+    openViewer(i);
+  },
+  _pendingBatches: () => globalThis.__pending.length,
+  _nextAdded: (n) => { globalThis.__nextAdded = n; },
+  _pageCalls: () => globalThis.__pageCalls,
+  _releaseAll: () => globalThis.__releaseAll(),
+};
+module.exports = __exports;
+`;
+    const module_ = { exports: {} };
+    new Function("module", "exports", "require", src)(
+      module_, module_.exports, require,
+    );
+    global.__viewer = module_.exports;
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.node = shutil.which("node")
+        if not cls.node:
+            raise unittest.SkipTest("需要 node 才能执行 viewer.js 的续页竞态")
+        cls.web = Path(__file__).parents[1] / "web" / "js" / "viewer.js"
+        cls.harness = Path(tempfile.mkdtemp()) / "qa-paging-harness.js"
+        cls.harness.write_text(cls.SCRIPT, encoding="utf-8")
+
+    def run_viewer(self, body: str) -> dict[str, Any]:
+        names = (
+            "openViewer",
+            "moveViewer",
+            "continueViewerPage",
+            "syncViewerSubtitle",
+            "bindViewerEvents",
+            "waitForLibraryIdle",
+        )
+        prelude = "".join(
+            f"globalThis.{name} = __viewer.{name};\n" for name in names
+        )
+        script = (
+            f"require({str(self.harness)!r});\n{prelude}"
+            f"(async () => {{\n{body}\n}})().catch((e) => {{\n"
+            f"  console.error(e && e.stack || e);\n"
+            f"  process.exit(1);\n}});\n"
+        )
+        completed = subprocess.run(
+            [self.node, "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "QA_VIEWER": str(self.web)},
+        )
+        if completed.returncode != 0:
+            self.fail(f"node 执行失败：\n{completed.stderr}")
+        return json.loads(completed.stdout.strip().splitlines()[-1])
+
+    def test_defect_presses_are_swallowed_when_a_page_is_already_in_flight(self) -> None:
+        """Close mid-batch, reopen, press next again: the press must not be lost.
+
+        The interleaving the engineer's timers could not pin down. Sequence:
+
+          1. at the loaded end, press next -> one request in flight
+          2. close the preview (the genuine close handler runs)
+          3. reopen a photo and press next again
+          4. the first batch lands
+
+        Step 3 is the problem. ``loadLibraryPage`` refuses to start while
+        ``state.library.loading`` is true (gallery.js:237), so the second press
+        gets *no request at all* -- but ``continueViewerPage`` never learns
+        that, because the real function returns ``undefined`` and the paging
+        code measures progress only by ``items.length`` growth. It therefore
+        reads "0 new photos" as "the load failed", toasts a bogus
+        "加载更多照片失败，请重试", and zeroes ``viewerPendingAdvance``.
+
+        The user-visible damage: the library was never broken, yet the app
+        claims it was, and the press that should have advanced the photo is
+        discarded. Asserting the toast text pins the false failure report.
+        """
+        result = self.run_viewer(
+            """
+            bindViewerEvents();
+            __viewer._seed(3, 9, false);
+            state.viewerIndex = 2;              // last loaded card
+            __viewer._nextAdded(3);
+            moveViewer(1);                       // request in flight
+            const inFlight = __viewer._pendingBatches();
+            const indexBeforeClose = state.viewerIndex;
+            __viewer._closeAndOpen(2);           // close, then reopen card 2
+            const indexAfterReopen = state.viewerIndex;
+            moveViewer(1);                       // press next again
+            const callsAfterSecondPress = __viewer._pageCalls();
+            // Let the second press's continuation run to completion BEFORE the
+            // batch lands. This is the realistic ordering -- the user presses
+            // next while the request is still open -- and it is what decides
+            // the bug: the continuation measures "items grew by 0" against a
+            // list that simply has not been appended to yet.
+            await wait(10);
+            const toastWhileStillInFlight = __viewer._toasts();
+            __viewer._releaseAll();              // first batch finally lands
+            await wait(30);
+            console.log(JSON.stringify({
+              inFlight,
+              indexBeforeClose,
+              indexAfterReopen,
+              callsAfterSecondPress,
+              pageCalls: __viewer._pageCalls(),
+              toastWhileStillInFlight,
+              index: state.viewerIndex,
+              items: state.items.length,
+              pending: state.viewerPendingAdvance,
+              toasts: __viewer._toasts(),
+              spinner: __viewer._pagingHidden(),
+            }));
+            """
+        )
+        self.assertEqual(result["inFlight"], 1, result)
+        self.assertEqual(result["indexBeforeClose"], 2, result)
+        self.assertEqual(result["indexAfterReopen"], 2, result)
+        # A second in-flight page must not be attempted...
+        self.assertEqual(
+            result["callsAfterSecondPress"],
+            1,
+            f"续页在途时不应再发第二个请求：{result}",
+        )
+        # ...and while it is still in flight the app must not claim failure.
+        self.assertNotIn(
+            "加载更多照片失败",
+            " ".join(result["toastWhileStillInFlight"]),
+            f"请求仍在进行中却报告失败：{result}",
+        )
+        # The batch did land, so the library grew.
+        self.assertEqual(result["items"], 6, result)
+        self.assertNotIn(
+            "加载更多照片失败",
+            " ".join(result["toasts"]),
+            f"续页成功却报告失败：{result['toasts']}",
+        )
+        self.assertEqual(result["spinner"], True, result)
+        # The press made after the reopen must still be honoured: the viewer
+        # was left at index 2 with 6 photos loaded, so next should reach 3.
+        self.assertEqual(
+            result["index"], 3, f"续页期间的按压被吞掉：{result}"
+        )
+
+    def test_defect_a_short_batch_leaves_the_viewer_stuck_with_no_word(self) -> None:
+        """Pressing next more times than the arriving batch can satisfy.
+
+        Three presses, one photo arrives. ``continueViewerPage`` computes
+        ``steps`` (3) and calls ``openViewer(viewerIndex + 3)``. ``openViewer``
+        now *refuses* out-of-range indices instead of wrapping them, so the
+        call silently returns false: the viewer does not move, even though one
+        step was perfectly satisfiable, and nothing tells the user why.
+
+        This is the direct cost of removing the modulo: "advance N steps" is
+        only safe while N steps exist. The user is left on the same photo,
+        mid-library, with a dead next button and no explanation.
+
+        Reverse proof: with the old modulo this index wrapped to 0 (the
+        original bug), so asserting "moved forward but not past the end"
+        distinguishes the correct behaviour from both failure modes.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(3, 9, false);
+            state.viewerIndex = 2;
+            __viewer._nextAdded(1);        // only ONE photo actually arrives
+            moveViewer(1);
+            moveViewer(1);
+            moveViewer(1);
+            const requested = state.viewerPendingAdvance;
+            __viewer._releaseAll();
+            await wait(30);
+            console.log(JSON.stringify({
+              requested,
+              index: state.viewerIndex,
+              items: state.items.length,
+              toasts: __viewer._toasts(),
+              spinner: __viewer._pagingHidden(),
+              indexText: __viewer._indexText(),
+            }));
+            """
+        )
+        self.assertEqual(result["requested"], 3, result)
+        self.assertEqual(result["items"], 4, result)
+        # One photo became available, so the viewer must land on it (index 3)
+        # rather than staying put...
+        self.assertEqual(
+            result["index"],
+            3,
+            f"到货批次少于按压次数时 viewers 卡住不动：{result}",
+        )
+        # ...and it must not pretend it reached past the end.
+        self.assertLessEqual(result["index"], result["items"] - 1, result)
+        self.assertEqual(result["spinner"], True, result)
+        # The silence is the other half of the defect: the user is stranded
+        # mid-library, so the app owes them an explanation.
+        self.assertTrue(
+            result["toasts"],
+            f"viewer 卡在中间且无任何提示，用户无法脱身：{result}",
+        )
+
+    def test_defect_previous_does_not_clear_a_pending_advance(self) -> None:
+        """Pressing previous must cancel a queued "next", not ride along with it.
+
+        ``moveViewer`` clears ``viewerPendingAdvance`` on the ordinary
+        in-range step, but the backward-wrap branch (``d < 0`` at the first
+        photo) returns without clearing it. A pending advance therefore
+        survives the wrap and fires later, teleporting the viewer forward by a
+        step the user never asked for -- after they had explicitly asked to go
+        backwards.
+
+        Reverse proof: with the clear present the final index stays put; with
+        it removed the index jumps forward, which is what this asserts against.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(1, 5, false);   // single loaded photo
+            state.viewerIndex = 0;
+            __viewer._nextAdded(2);
+            moveViewer(1);                 // queue an advance, request in flight
+            const queued = state.viewerPendingAdvance;
+            moveViewer(-1);                // "previous" -- must cancel it
+            const afterPrev = state.viewerPendingAdvance;
+            const indexAfterPrev = state.viewerIndex;
+            __viewer._releaseAll();
+            await wait(30);
+            console.log(JSON.stringify({
+              queued, afterPrev, indexAfterPrev,
+              index: state.viewerIndex,
+              items: state.items.length,
+            }));
+            """
+        )
+        self.assertEqual(result["queued"], 1, result)
+        # Going backwards must drop the queued forward intent.
+        self.assertEqual(
+            result["afterPrev"],
+            0,
+            f"「上一张」没有作废待前进计数：{result}",
+        )
+        self.assertEqual(
+            result["index"],
+            result["indexAfterPrev"],
+            f"残留的 pendingAdvance 把 viewer 又推前了一张：{result}",
+        )
+
+    def test_a_batch_from_a_dead_generation_never_merges_or_advances(self) -> None:
+        """Switching project mid-batch: the batch must not enter the new list.
+
+        This is the safe counterpart to the defect above, pinned so a future
+        change cannot trade one for the other. ``loadView`` bumps both
+        ``viewerPageToken`` and ``state.library.generation``; the in-flight
+        batch belongs to the project the user just left.
+
+        Asserting ``items == 0`` after the switch is what makes this a real
+        guard: the old project's photos must not appear under the new project,
+        and ``viewerIndex`` must not be moved onto them.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(3, 9, false);
+            state.viewerIndex = 2;
+            __viewer._nextAdded(3);
+            moveViewer(1);
+            const generationBefore = state.library.generation;
+            // What showProject()/loadView() do on a project switch.
+            state.library = {
+              offset: 0, total: 0, done: false, loading: false,
+              generation: state.library.generation + 1,
+            };
+            state.items = [];
+            state.viewerPageToken += 1;
+            state.viewerPendingAdvance = 0;
+            __viewer._releaseAll();
+            await wait(30);
+            console.log(JSON.stringify({
+              generationBefore,
+              generationAfter: state.library.generation,
+              items: state.items.length,
+              index: state.viewerIndex,
+              toasts: __viewer._toasts(),
+              spinner: __viewer._pagingHidden(),
+            }));
+            """
+        )
+        self.assertEqual(result["generationAfter"], result["generationBefore"] + 1, result)
+        self.assertEqual(
+            result["items"], 0, f"旧项目的批次被并进了新项目：{result}"
+        )
+        self.assertEqual(result["index"], 2, result)
+        self.assertEqual(result["spinner"], True, result)
+
+    def test_next_on_a_single_loaded_photo_still_pages_forward(self) -> None:
+        """``items.length === 1`` with more to come must page, not stall.
+
+        The degenerate case of the boundary check: with one card loaded,
+        ``viewerIndex + 1`` equals ``items.length``, so the index is out of
+        range on the very first press. That must still trigger the
+        continuation rather than being mistaken for the end of the library.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(1, 5, false);
+            state.viewerIndex = 0;
+            __viewer._nextAdded(2);
+            moveViewer(1);
+            const callsDuringFlight = __viewer._pageCalls();
+            __viewer._releaseAll();
+            await wait(30);
+            console.log(JSON.stringify({
+              callsDuringFlight,
+              index: state.viewerIndex,
+              items: state.items.length,
+              toasts: __viewer._toasts(),
+            }));
+            """
+        )
+        self.assertEqual(result["callsDuringFlight"], 1, result)
+        self.assertEqual(result["items"], 3, result)
+        self.assertEqual(result["index"], 1, result)
+        self.assertFalse(
+            any("失败" in t for t in result["toasts"]),
+            f"单张已加载时不应报错：{result['toasts']}",
+        )
+
+    def test_the_counter_never_shows_a_position_past_the_end(self) -> None:
+        """After paging, the readout must not contradict itself.
+
+        The engineer changed the denominator to ``library.total``. That is
+        right, but it is only half the invariant: during the batch the viewer
+        sits on the last loaded card, so a *stale* numerator over a fresh
+        denominator would read "200 / 367" while the user is actually looking
+        at a photo that exists. This pins that the numerator and denominator
+        are both derived from the same loaded slice at the moment they are
+        rendered, and that the value is never "N / N-1".
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(3, 367, false);   // the user's real library shape
+            state.viewerIndex = 2;
+            __viewer._nextAdded(120);
+            moveViewer(1);
+            __viewer._releaseAll();
+            await wait(40);
+            const text = __viewer._indexText();
+            const parts = text.split("/").map((s) => s.trim());
+            console.log(JSON.stringify({
+              text,
+              numerator: Number(parts[0]),
+              denominator: Number(parts[1]),
+              index: state.viewerIndex,
+              items: state.items.length,
+              total: state.library.total,
+            }));
+            """
+        )
+        self.assertTrue(result["text"].strip(), "位置指示不应为空")
+        self.assertEqual(result["denominator"], 367, result)
+        self.assertEqual(
+            result["numerator"],
+            result["index"] + 1,
+            f"分子必须等于当前下标 + 1：{result}",
+        )
+        self.assertLessEqual(
+            result["numerator"],
+            result["denominator"],
+            f"位置指示出现「越界」读数：{result}",
+        )
+
+
+class QuarantineRunnerGuardQATests(unittest.TestCase):
+    """QA pass on the two guards the background refactor could have dropped.
+
+    Splitting ``apply_quarantine`` into "start a thread" + "task body" moved
+    the work out of the request handler, and with it the two context managers
+    the old synchronous handler had wrapped around it. Each test below pins one
+    of them, so a later refactor cannot shed them silently.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.photos = self.root / "photos"
+        self.photos.mkdir()
+        self.config = ConfigStore(self.root / "config.json")
+        self.config.data["default_cache_root"] = str(self.root / "cache")
+        self.config.save()
+        self.manager = ProjectManager(self.config)
+        self.project = self.manager.open(str(self.photos))
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def prepare(self, names: list[str]) -> None:
+        for index, name in enumerate(names):
+            Image.new("RGB", (64, 48), (10 + index * 7, 20, 30)).save(
+                self.photos / name
+            )
+        scanner = Scanner(self.config, self.manager)
+        scanner.start(self.project.project_id)
+        scanner.threads[self.project.project_id].join(60)
+        with closing(connect_db(self.project.db_path)) as conn:
+            conn.execute("UPDATE photos SET decision='remove'")
+            conn.commit()
+
+    def wait_done(self, runner: http_api.QuarantineRunner) -> dict[str, Any]:
+        for _ in range(600):
+            progress = runner.get_progress(self.project.project_id)
+            if progress.get("done"):
+                return progress
+            time.sleep(0.02)
+        self.fail("隔离任务未在预期时间内完成")
+
+    def test_defect_background_run_drops_the_data_operation_guard(self) -> None:
+        """The task body must still hold ``manager.data_operation``.
+
+        The old handler was::
+
+            with self.scanner.project_operation(project_id, "隔离照片"):
+                with self.manager.data_operation(project_id):
+                    result = apply_quarantine(...)
+
+        ``QuarantineRunner._run`` reacquired only the first one. The second is
+        not redundant: ``data_operation`` is the per-project RLock that keeps
+        these writes from crossing a cache migration (see its docstring), and
+        it is taken by ``apply_profile`` and by the cache-moving routes. With
+        the guard gone, a background quarantine can move files while a profile
+        apply relocates the cache, instead of the two serialising.
+
+        Reverse proof: this asserts the guard is *entered*. Removing it -- the
+        state of the tree right now -- reports ``[]`` and fails.
+        """
+        self.prepare(["guarded.jpg"])
+        entered: list[str] = []
+        original = self.manager.data_operation
+
+        def spy(project_id: str):
+            @contextmanager
+            def guard():
+                entered.append(project_id)
+                with original(project_id):
+                    yield
+
+            return guard()
+
+        self.manager.data_operation = spy  # type: ignore[method-assign]
+        scanner = Scanner(self.config, self.manager)
+        runner = http_api.QuarantineRunner(self.manager, scanner.project_operation)
+        runner.start(self.project.project_id)
+        final = self.wait_done(runner)
+        self.assertEqual(final["stage"], "complete", final)
+        self.assertEqual(
+            entered,
+            [self.project.project_id],
+            "后台隔离必须持有 data_operation 写锁，否则会与缓存迁移交叉",
+        )
+
+    def test_an_idle_progress_poll_must_not_invalidate_the_similarity_cache(self) -> None:
+        """Polling progress for a project that never ran must be side-effect free.
+
+        ``api_quarantine_progress`` invalidates whenever the payload reports
+        ``done`` and no error -- but ``get_progress`` returns
+        ``{"stage": "idle", "done": True}`` for a project with no run at all.
+        So the *idle* payload satisfies the condition and every stray poll
+        throws away the cached similarity grouping. The intent was "invalidate
+        once, when a finished run is first observed".
+
+        Reverse proof: asserting ``[]`` fails today (the current code calls
+        ``invalidate`` on the idle payload), and passing requires the
+        invalidation to be keyed on an actual completed run.
+        """
+        application = http_api.ApplicationContext(
+            self.config,
+            self.manager,
+            Scanner(self.config, self.manager),
+            SimilarityGroupCache(),
+            "test-token",
+            Path("web"),
+        )
+        invalidated: list[str] = []
+        application.similarity_groups.invalidate = invalidated.append  # type: ignore[method-assign]
+        context = application
+        # Bound through the enclosing name: a class body cannot read the
+        # enclosing function's `self`.
+        project_id = self.project.project_id
+
+        class FakeHandler:
+            application = context
+
+            @property
+            def quarantine_runner(self):
+                return context.quarantine_runner
+
+            @property
+            def similarity_groups(self):
+                return context.similarity_groups
+
+            def _query(self):
+                return {"project_id": [project_id]}
+
+            def _send_json(self, payload):
+                self.payload = payload
+
+        handler = FakeHandler()
+        http_api.Handler.api_quarantine_progress(handler)
+        self.assertEqual(handler.payload, {"stage": "idle", "done": True})
+        self.assertEqual(
+            invalidated,
+            [],
+            "空闲轮询不得作废相似连拍缓存（该项目根本没有运行过隔离）",
+        )
+
+    def test_defect_undo_restores_a_mixed_batch_without_touching_failures(self) -> None:
+        """Undo after a partly-failed batch: moved files come back, failures stay.
+
+        The engineer justified "撤销 = restore this batch" with "one apply
+        produces exactly one batch, and manifest entries with status='error'
+        were never moved, so restore skips them." That argument holds, but it
+        was asserted only in prose. The interesting part is that an ``error``
+        entry still carries a ``quarantine_path`` -- it was computed during
+        preparation, *before* the move was attempted -- so "restore skips it"
+        depends entirely on the status filter in ``_restore_manifest_item``.
+
+        Reverse proof: a restore that treated ``error`` as restorable would try
+        to move a file out of a quarantine directory it was never placed in,
+        and ``boom.jpg`` would be lost from both locations. Asserting it is
+        still on disk afterwards is what catches that.
+        """
+        self.prepare(["aaa.jpg", "boom.jpg", "ccc.jpg"])
+        real_move = shutil.move
+
+        def flaky_move(source, destination):
+            if "boom" in str(source):
+                raise OSError("simulated move failure")
+            return real_move(source, destination)
+
+        with mock.patch("cullumi.workflows.shutil.move", side_effect=flaky_move):
+            batch = apply_quarantine(self.project)
+        self.assertEqual(batch["moved"], 2, batch)
+        self.assertEqual(batch["failed"], 1, batch)
+
+        manifest = json.loads(
+            (
+                self.project.root
+                / "_照片筛选隔离"
+                / str(batch["batch_id"])
+                / "manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        statuses = {row["relative_path"]: row["status"] for row in manifest}
+        self.assertEqual(statuses["aaa.jpg"], "moved", statuses)
+        self.assertEqual(statuses["boom.jpg"], "error", statuses)
+        # The failed entry does record a quarantine_path even though nothing
+        # was ever moved there -- which is exactly why the status filter, not
+        # the path's presence, has to be what protects it.
+        boom_entry = next(
+            row for row in manifest if row["relative_path"] == "boom.jpg"
+        )
+        self.assertTrue(boom_entry.get("quarantine_path"), boom_entry)
+
+        restored = restore_batch(self.project, str(batch["batch_id"]))
+        self.assertEqual(restored["restored"], 2, restored)
+        self.assertEqual(restored["missing"], 0, restored)
+        self.assertEqual(restored["conflicts"], 0, restored)
+        for name in ("aaa.jpg", "boom.jpg", "ccc.jpg"):
+            self.assertTrue(
+                (self.photos / name).exists(),
+                f"撤销之后 {name} 必须回到原处",
+            )
+        with closing(connect_db(self.project.db_path)) as conn:
+            rows = conn.execute(
+                "SELECT relative_path,status FROM photos ORDER BY relative_path"
+            ).fetchall()
+        self.assertEqual(
+            {row["relative_path"]: row["status"] for row in rows},
+            {
+                "aaa.jpg": "active",
+                "boom.jpg": "active",
+                "ccc.jpg": "active",
+            },
+            rows,
+        )
+
+
+class ViewerPagingProtectionQATests(unittest.TestCase):
+    """Round 2: attack the *new* protections added to fix the round-1 defects.
+
+    Three of the five round-1 defects were "an old mechanism was removed but
+    the accompanying handling was not added". The fixes therefore introduced
+    new machinery -- a generation token, a ``joinsInflight`` discriminator, a
+    bounded wait, a deferred pending-clear -- and this class attacks that
+    machinery rather than the original bugs.
+
+    The harness resolves page requests manually and can make the in-flight one
+    **fail**, land **fewer items than asked**, or **hang forever**, so every
+    interleaving below is deterministic rather than timing-dependent.
+    """
+
+    SCRIPT = """
+    const fs = require("fs");
+    const source = fs.readFileSync(process.env.QA_VIEWER, "utf8");
+
+    const listeners = new Map();
+    function makeEl(id) {
+      return {
+        id, naturalWidth: 0, naturalHeight: 0, offsetWidth: 0, offsetHeight: 0,
+        complete: true, style: {}, dataset: {},
+        classList: {
+          _s: new Set(),
+          add(c) { this._s.add(c); },
+          remove(c) { this._s.delete(c); },
+          contains(c) { return this._s.has(c); },
+          toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); },
+        },
+        _attrs: {},
+        get src() { return this._attrs.src ?? ""; },
+        set src(v) { this._attrs.src = v; },
+        getAttribute(k) { return this._attrs[k] ?? null; },
+        setAttribute(k, v) { this._attrs[k] = v; },
+        addEventListener(ev, fn) {
+          const key = id + ":" + ev;
+          if (!listeners.has(key)) listeners.set(key, []);
+          listeners.get(key).push(fn);
+        },
+        removeEventListener() {},
+        getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
+        parentElement: null, focus() {}, open: true,
+        showModal() { this.open = true; },
+        close() { this.open = false; },
+        pause() {}, play() {}, load() {},
+        removeAttribute(k) { delete this._attrs[k]; },
+        querySelector() { return null; },
+        querySelectorAll() { return []; },
+        appendChild() {}, removeChild() {}, insertBefore() {},
+        contains() { return false; },
+        set textContent(v) { this._text = String(v ?? ""); },
+        get textContent() { return this._text ?? ""; },
+        set innerHTML(v) { this._html = String(v ?? ""); },
+        get innerHTML() { return this._html ?? ""; },
+      };
+    }
+    const els = new Map();
+    function $(sel) {
+      const id = sel.replace(/^#/, "");
+      if (!els.has(id)) {
+        const el = makeEl(id);
+        el.parentElement = makeEl(id + "-parent");
+        el.parentElement.clientWidth = 1521;
+        el.parentElement.clientHeight = 1013;
+        els.set(id, el);
+      }
+      return els.get(id);
+    }
+    const $$ = () => [];
+    const toasts = [];
+    const toast = (m) => toasts.push(m);
+    globalThis.__els = els;
+    globalThis.__viewerListeners = listeners;
+
+    global.$ = $; global.$$ = $$; global.toast = toast; global.toasts = toasts;
+    global.window = { devicePixelRatio: 1 };
+    global.window.addEventListener = () => {};
+    global.window.removeEventListener = () => {};
+    global.window.matchMedia = () => ({ matches: false });
+    global.document = { querySelector: $ };
+    global.formatSize = (n) => `${Math.round((n || 0) / 1024)} KB`;
+    // __waitScale shrinks ONLY the viewer's internal 20ms polls, so the
+    // bounded wait can be exercised in milliseconds. Test-side sleeps use
+    // __realSleep and are never scaled.
+    globalThis.__waitScale = 1;
+    global.wait = (ms) => new Promise((resolve) =>
+      setTimeout(resolve, Math.round(ms * globalThis.__waitScale)));
+    globalThis.__realSleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    global.variantFormatText = () => "";
+    global.isFoldedVariant = () => false;
+    global.syncViewerDecisions = async () => {};
+    global.state = {
+      viewerIndex: 0, items: [], view: "library",
+      library: { offset: 0, total: 0, done: false, loading: false, generation: 0 },
+      viewerMotion: { active: false },
+      viewerTransform: { scale: 1, x: 0, y: 0, dragging: false },
+      viewerTier: 0, viewerTierPending: null, viewerTierAutoOneToOne: false,
+      viewerTierTimer: null, viewerOriginalFailed: new Set(),
+      viewerClickTimer: null,
+      viewerPageToken: 0, viewerPendingAdvance: 0, viewerPageLoading: false,
+    };
+    const mkPhoto = (id) => ({
+      id, relative_path: "trip/IMG_" + String(id).padStart(4, "0") + ".JPG",
+      media_type: "image", width: 4000, height: 3000, size: 2000000,
+      decision: "undecided", suggestion: "keep", format_category: "jpeg",
+      photo_url: "/api/photo?id=" + id,
+      preview_url: "/api/photo?id=" + id + "&w=2048",
+      error: "",
+    });
+    globalThis.__mkPhoto = mkPhoto;
+
+    globalThis.__pending = [];
+    globalThis.__nextAdded = 0;
+    globalThis.__pageCalls = 0;
+    globalThis.__hang = false;
+
+    global.loadLibraryPage = async () => {
+      // The real dedupe (gallery.js:237): returns undefined, no request.
+      if (state.library.loading) return;
+      globalThis.__pageCalls += 1;
+      const generation = state.library.generation;
+      state.library.loading = true;
+      await new Promise((resolve, reject) => {
+        globalThis.__pending.push({ resolve, reject, generation });
+      });
+    };
+    globalThis.__release = (mode) => {
+      const queued = globalThis.__pending.splice(0, globalThis.__pending.length);
+      queued.forEach((entry) => {
+        if (globalThis.__hang) return;             // never settles
+        state.library.loading = false;
+        if (entry.generation !== state.library.generation) {
+          entry.resolve(true); return;             // stale batch, dropped
+        }
+        if (mode === "fail") { entry.reject(new Error("network down")); return; }
+        const n = globalThis.__nextAdded;
+        for (let i = 0; i < n; i += 1) {
+          state.items.push(mkPhoto(state.items.length + 1));
+        }
+        state.library.offset += n;
+        state.library.done = state.library.offset >= state.library.total;
+        entry.resolve(true);
+      });
+    };
+    globalThis.__releaseOk = () => globalThis.__release("ok");
+    globalThis.__probes = [];
+    global.Image = class {
+      constructor() {
+        this.onload = null; this.onerror = null; this._src = "";
+        globalThis.__probes.push(this);
+      }
+      set src(v) { this._src = v; }
+      get src() { return this._src; }
+      addEventListener() {}
+      removeEventListener() {}
+    };
+
+    const src = source + `
+;var __exports = {
+  openViewer, moveViewer, continueViewerPage, syncViewerSubtitle, bindViewerEvents,
+  waitForLibraryIdle, VIEWER_PAGE_WAIT_LIMIT,
+  get _state() { return state; },
+  _seed: (n, total, done) => {
+    state.items = [];
+    for (let i = 0; i < n; i += 1) state.items.push(globalThis.__mkPhoto(i + 1));
+    state.library = {
+      offset: n, total: total ?? n, done: !!done, loading: false,
+      generation: state.library.generation,
+    };
+    state.viewerIndex = 0;
+    state.viewerPendingAdvance = 0;
+    state.viewerPageLoading = false;
+    state.viewerPageToken = 0;
+    $("#viewerPaging").classList.add("hidden");
+    toasts.length = 0;
+    globalThis.__pending.length = 0;
+    globalThis.__pageCalls = 0;
+    globalThis.__hang = false;
+    globalThis.__waitScale = 1;
+  },
+  _toasts: () => toasts.slice(),
+  _pagingHidden: () => $("#viewerPaging").classList.contains("hidden"),
+  _indexText: () => $("#viewerIndex").textContent,
+  _close: () => {
+    $("#viewer").open = false;
+    (globalThis.__viewerListeners.get("viewer:close") || []).forEach((fn) => fn());
+  },
+  _closeAndOpen: (i) => {
+    $("#viewer").open = false;
+    (globalThis.__viewerListeners.get("viewer:close") || []).forEach((fn) => fn());
+    openViewer(i);
+  },
+  // what loadView() does before rebuilding the list
+  _loadView: () => {
+    state.viewerPageToken += 1;
+    state.viewerPendingAdvance = 0;
+    state.viewerPageLoading = false;
+  },
+  // what loadLibraryPage(true) does: fresh object, generation + 1
+  _resetLibrary: () => {
+    state.library = {
+      offset: 0, total: 0, done: false, loading: state.library.loading,
+      generation: state.library.generation + 1,
+    };
+    state.items = [];
+  },
+  _pendingBatches: () => globalThis.__pending.length,
+  _nextAdded: (n) => { globalThis.__nextAdded = n; },
+  _hang: (v) => { globalThis.__hang = !!v; },
+  _waitScale: (v) => { globalThis.__waitScale = v; },
+  _pageCalls: () => globalThis.__pageCalls,
+  _releaseFail: () => globalThis.__release("fail"),
+  _releaseOk: () => globalThis.__release("ok"),
+  _sleep: (ms) => globalThis.__realSleep(ms),
+  _libraryLoading: () => state.library.loading,
+};
+module.exports = __exports;
+`;
+    const module_ = { exports: {} };
+    new Function("module", "exports", "require", src)(
+      module_, module_.exports, require,
+    );
+    global.__viewer = module_.exports;
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.node = shutil.which("node")
+        if not cls.node:
+            raise unittest.SkipTest("需要 node 才能执行 viewer.js 的续页保护逻辑")
+        cls.web = Path(__file__).parents[1] / "web" / "js" / "viewer.js"
+        cls.harness = Path(tempfile.mkdtemp()) / "qa-protection-harness.js"
+        cls.harness.write_text(cls.SCRIPT, encoding="utf-8")
+
+    def run_viewer(self, body: str) -> dict[str, Any]:
+        names = (
+            "openViewer",
+            "moveViewer",
+            "continueViewerPage",
+            "syncViewerSubtitle",
+            "bindViewerEvents",
+            "waitForLibraryIdle",
+        )
+        prelude = "".join(
+            f"globalThis.{name} = __viewer.{name};\n" for name in names
+        )
+        script = (
+            f"require({str(self.harness)!r});\n{prelude}"
+            f"(async () => {{\n{body}\n}})().catch((e) => {{\n"
+            f"  console.error(e && e.stack || e);\n"
+            f"  process.exit(1);\n}});\n"
+        )
+        completed = subprocess.run(
+            [self.node, "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={**os.environ, "QA_VIEWER": str(self.web)},
+        )
+        if completed.returncode != 0:
+            self.fail(f"node 执行失败：\n{completed.stderr}")
+        return json.loads(completed.stdout.strip().splitlines()[-1])
+
+    def test_a_joined_press_waits_for_the_in_flight_batch_instead_of_failing(self) -> None:
+        """The ``joinsInflight`` discriminator: joining is not failing.
+
+        Round 1's D1 was exactly this: a second press while a batch was in
+        flight got no request of its own, and the code read "0 new photos" as
+        failure. The fix reads ``state.library.loading`` *before* awaiting and
+        waits for the in-flight batch.
+
+        Asserting the joined press is honoured (index 2 -> 3) is what makes
+        this a test of the fix rather than of the absence of a toast.
+        """
+        result = self.run_viewer(
+            """
+            bindViewerEvents();
+            __viewer._seed(3, 9, false);
+            state.viewerIndex = 2;
+            __viewer._nextAdded(3);
+            moveViewer(1);                          // owns the request
+            __viewer._closeAndOpen(2);              // close, reopen, token bumped
+            moveViewer(1);                          // joins the in-flight batch
+            await __viewer._sleep(20);
+            const stillInFlight = __viewer._libraryLoading();
+            __viewer._releaseOk();                  // the batch lands
+            await __viewer._sleep(80);
+            console.log(JSON.stringify({
+              stillInFlight,
+              pageCalls: __viewer._pageCalls(),
+              index: state.viewerIndex,
+              items: state.items.length,
+              toasts: __viewer._toasts(),
+              spinner: __viewer._pagingHidden(),
+            }));
+            """
+        )
+        self.assertTrue(result["stillInFlight"], result)
+        self.assertEqual(
+            result["pageCalls"], 1, f"在途时不应发第二个请求：{result}"
+        )
+        self.assertEqual(result["items"], 6, result)
+        self.assertEqual(
+            result["index"], 3, f"加入在途批次的按压必须被兑现：{result}"
+        )
+        self.assertFalse(
+            any("失败" in t for t in result["toasts"]),
+            f"加入在途批次不得被误报为失败：{result['toasts']}",
+        )
+
+    def test_a_joined_press_reports_a_honest_failure_when_the_batch_fails(self) -> None:
+        """Joining is not failing -- but a genuinely failed batch still must.
+
+        The mirror of the test above. If the in-flight batch really does fail,
+        the joined press has no photos to move to and the user must be told,
+        rather than the viewer sitting there silently.
+        """
+        result = self.run_viewer(
+            """
+            bindViewerEvents();
+            __viewer._seed(3, 9, false);
+            state.viewerIndex = 2;
+            moveViewer(1);                          // owns the request
+            __viewer._closeAndOpen(2);
+            moveViewer(1);                          // joins
+            await __viewer._sleep(20);
+            __viewer._releaseFail();                // it really fails
+            await __viewer._sleep(80);
+            console.log(JSON.stringify({
+              index: state.viewerIndex,
+              items: state.items.length,
+              toasts: __viewer._toasts(),
+              pending: state.viewerPendingAdvance,
+              spinner: __viewer._pagingHidden(),
+              libraryLoading: __viewer._libraryLoading(),
+            }));
+            """
+        )
+        self.assertEqual(result["items"], 3, result)
+        self.assertEqual(result["index"], 2, result)
+        self.assertTrue(
+            result["toasts"], f"在途批次真的失败时必须提示：{result}"
+        )
+        self.assertFalse(
+            any("超时" in t for t in result["toasts"]),
+            f"失败不是超时，别混为一谈：{result['toasts']}",
+        )
+        self.assertEqual(result["spinner"], True, result)
+        self.assertEqual(result["pending"], 0, result)
+
+    def test_defect_a_hung_request_of_its_own_leaves_the_button_dead_forever(self) -> None:
+        """The bounded wait is only consulted on the JOIN path.
+
+        ``waitForLibraryIdle`` runs when ``joinsInflight`` is true -- that is,
+        when this call did *not* issue the request. When the viewer issues the
+        request itself and that request never settles, the code simply awaits
+        it forever:
+
+            await loadLibraryPage(false);   // no cap on this await
+            const joined = joinsInflight ? await waitForLibraryIdle() : true;
+
+        ``viewerPageLoading`` stays true, so every later "next" is swallowed by
+        the first line of ``continueViewerPage`` and ``viewerPendingAdvance``
+        grows without bound. This is precisely the "button stops working
+        entirely" failure the cap was added to prevent -- the engineer closed
+        it for the join path only.
+
+        Reverse proof: with a cap on the own-request await, ``spinner`` would be
+        true and a fresh press would issue a new request. Asserting both
+        fails today.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(3, 9, false);
+            // AFTER _seed: seeding resets the wait scale, so this must follow.
+            // Same idiom as the two sibling tests in this class: collapse the
+            // viewer's internal 20ms polls so the 750-iteration cap is reached
+            // in milliseconds. Only the WAITING changes -- every assertion
+            // below is untouched, because what is under test is the behaviour
+            // (the button comes back), not how long the cap takes.
+            __viewer._waitScale(0);
+            state.viewerIndex = 2;
+            __viewer._hang(true);            // this request never settles
+            moveViewer(1);                   // the viewer issues it itself
+            // Poll for the release instead of one fixed sleep. The exit
+            // condition is the state under test (viewerPageLoading cleared);
+            // the iteration count is only a hang guard, so a wedged build
+            // fails the assertions below rather than hanging the suite.
+            for (let i = 0; i < 400; i += 1) {
+              if (state.viewerPageLoading === false) break;
+              await __viewer._sleep(10);
+            }
+            await __viewer._sleep(30);
+            const wedged = {
+              pageLoading: state.viewerPageLoading,
+              spinner: __viewer._pagingHidden(),
+              pending: state.viewerPendingAdvance,
+              toasts: __viewer._toasts(),
+            };
+            const callsBefore = __viewer._pageCalls();
+            moveViewer(1); moveViewer(1);    // the user keeps pressing
+            // Recovery means the button accepted those presses and finished
+            // processing them, so wait for the guard to cycle again rather than
+            // for a fixed span. Exit on EITHER a genuinely new request going out
+            // OR the in-flight guard releasing: a re-press here is deduped by
+            // the still-hung request, so pageCalls alone would never move and
+            // this loop would sit out its whole bound for nothing.
+            for (let i = 0; i < 200; i += 1) {
+              if (__viewer._pageCalls() > callsBefore) break;
+              if (state.viewerPageLoading === false) break;
+              await __viewer._sleep(5);
+            }
+            const afterPresses = {
+              pageCalls: __viewer._pageCalls(),
+              pending: state.viewerPendingAdvance,
+            };
+            console.log(JSON.stringify({ wedged, afterPresses }));
+            """
+        )
+        # The button must not stay wedged: the indicator has to come down and
+        # the user has to be told, exactly as on the join path.
+        self.assertTrue(
+            result["wedged"]["spinner"],
+            f"自己发出的请求卡死时转圈永不停止：{result}",
+        )
+        self.assertFalse(
+            result["wedged"]["pageLoading"],
+            f"viewerPageLoading 被永久占住，之后每次「下一张」都被第一行吞掉：{result}",
+        )
+        self.assertTrue(
+            result["wedged"]["toasts"],
+            f"卡死时必须给出提示（超时或失败），不能沉默：{result}",
+        )
+        # And the accumulated intent must not grow without bound.
+        self.assertLessEqual(
+            result["afterPresses"]["pending"],
+            1,
+            f"待前进计数在卡死期间无限累加：{result}",
+        )
+
+    def test_a_hung_joined_request_times_out_and_then_recovers(self) -> None:
+        """The join path's cap: honest wording, and the button comes back.
+
+        This is the test the engineer explicitly asked for. A request left in
+        flight by an infinite scroll never answers; the viewer joins it, hits
+        the 15s cap, and must say "超时" rather than "失败" (they ask different
+        things of the user), drop the spinner, release ``viewerPageLoading``,
+        and let a later press work again once the request clears.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(3, 9, false);
+            // AFTER _seed: seeding resets the wait scale, so this must follow.
+            __viewer._waitScale(0);          // 750 polls collapse to ~0ms
+            state.viewerIndex = 2;
+            __viewer._hang(true);
+            loadLibraryPage(false);           // a scroll left this in flight
+            await __viewer._sleep(30);
+            const loadingAtPress = __viewer._libraryLoading();
+            moveViewer(1);                   // joins the hung request
+            // Poll for the verdict rather than guessing a sleep: the cap is
+            // 750 iterations, which at scale 0 is milliseconds but is still
+            // an implementation detail we must not hard-code.
+            for (let i = 0; i < 400; i += 1) {
+              if (state.viewerPageLoading === false) break;
+              await __viewer._sleep(10);
+            }
+            await __viewer._sleep(30);
+            const timedOut = {
+              loadingAtPress,
+              toasts: __viewer._toasts(),
+              index: state.viewerIndex,
+              pending: state.viewerPendingAdvance,
+              pageLoading: state.viewerPageLoading,
+              spinner: __viewer._pagingHidden(),
+            };
+            // The stuck request finally answers; the viewer must work again.
+            __viewer._hang(false);
+            __viewer._nextAdded(3);
+            __viewer._releaseOk();
+            await __viewer._sleep(100);
+            state.viewerIndex = state.items.length - 1;
+            const callsBefore = __viewer._pageCalls();
+            __viewer._nextAdded(2);
+            moveViewer(1);
+            await __viewer._sleep(200);
+            console.log(JSON.stringify({
+              timedOut,
+              recovered: {
+                callsBefore,
+                callsAfter: __viewer._pageCalls(),
+                index: state.viewerIndex,
+                items: state.items.length,
+                spinner: __viewer._pagingHidden(),
+              },
+            }));
+            """
+        )
+        self.assertTrue(result["timedOut"]["loadingAtPress"], result)
+        self.assertTrue(
+            any("超时" in t for t in result["timedOut"]["toasts"]),
+            f"等到上限必须说「超时」而不是「失败」：{result}",
+        )
+        self.assertFalse(
+            any("失败" in t for t in result["timedOut"]["toasts"]),
+            f"超时不许混进「加载失败」：{result}",
+        )
+        self.assertEqual(
+            result["timedOut"]["spinner"], True, f"超时后必须退出转圈：{result}"
+        )
+        self.assertEqual(
+            result["timedOut"]["pageLoading"],
+            False,
+            f"超时后必须释放 viewerPageLoading，否则按钮彻底失灵：{result}",
+        )
+        # Recovery: a later press must issue a real new request.
+        self.assertGreater(
+            result["recovered"]["callsAfter"],
+            result["recovered"]["callsBefore"],
+            f"超时之后「下一张」必须能重新发起请求：{result}",
+        )
+
+    def test_the_bounded_wait_is_actually_bounded(self) -> None:
+        """The cap must be a finite iteration count, not an unbounded poll.
+
+        Written as a structural assertion on top of a behavioural one: an
+        implementation of ``waitForLibraryIdle`` as ``while (loading) {}`` would
+        hang the test outright, so the bound is pinned directly.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(3, 9, false);
+            __viewer._waitScale(0);
+            state.viewerIndex = 2;
+            __viewer._hang(true);
+            loadLibraryPage(false);
+            await __viewer._sleep(30);
+            const started = Date.now();
+            const settled = await waitForLibraryIdle();
+            console.log(JSON.stringify({
+              limit: __viewer.VIEWER_PAGE_WAIT_LIMIT,
+              settled,
+              elapsed: Date.now() - started,
+              stillLoading: __viewer._libraryLoading(),
+            }));
+            """
+        )
+        limit = result["limit"]
+        self.assertIsInstance(limit, int, result)
+        self.assertGreater(limit, 0, "等待上限必须是正的有限值")
+        self.assertLess(
+            limit, 100000, f"等待上限看起来是无界的：{limit}"
+        )
+        # It gave up rather than returning true, and it did so promptly.
+        self.assertFalse(result["settled"], result)
+        self.assertTrue(result["stillLoading"], result)
+        self.assertLess(result["elapsed"], 5000, result)
+
+    def test_pending_advance_never_goes_negative(self) -> None:
+        """Mashing "previous" must not drive the counter below zero.
+
+        The round-1 fix cleared ``viewerPendingAdvance`` on the backward-wrap
+        branch, so the counter is now written from two directions. A plain
+        ``-= 1`` (or a wrong guard) would let it go negative, and a negative
+        count would then be used as a forward offset in
+        ``openViewer(viewerIndex + steps)`` -- silently jumping somewhere
+        arbitrary.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(4, 4, true);
+            state.viewerIndex = 0;
+            for (let i = 0; i < 8; i += 1) moveViewer(-1);
+            const afterPrev = {
+              index: state.viewerIndex,
+              pending: state.viewerPendingAdvance,
+            };
+            // interleave: queue a forward intent, then walk backwards past it
+            __viewer._seed(1, 5, false);
+            state.viewerIndex = 0;
+            __viewer._nextAdded(2);
+            moveViewer(1);
+            const queued = state.viewerPendingAdvance;
+            moveViewer(-1);
+            const afterCancel = state.viewerPendingAdvance;
+            __viewer._releaseOk();
+            await __viewer._sleep(80);
+            console.log(JSON.stringify({
+              afterPrev, queued, afterCancel,
+              finalIndex: state.viewerIndex,
+              finalPending: state.viewerPendingAdvance,
+              items: state.items.length,
+            }));
+            """
+        )
+        self.assertGreaterEqual(
+            result["afterPrev"]["pending"],
+            0,
+            f"连按「上一张」把待前进计数压成了负数：{result}",
+        )
+        self.assertEqual(
+            result["afterCancel"],
+            0,
+            f"「上一张」必须作废待前进计数：{result}",
+        )
+        self.assertGreaterEqual(result["finalPending"], 0, result)
+        self.assertGreaterEqual(
+            result["finalIndex"],
+            0,
+            f"负的步数把 viewer 推到了非法下标：{result}",
+        )
+
+    def test_a_refilter_never_receives_the_previous_filter_s_batch(self) -> None:
+        """``loadView`` + ``loadLibraryPage(true)`` must not adopt the old batch.
+
+        The invalidation branch deliberately does **not** clear the pending
+        count any more (that was the engineer's second self-found fix), so
+        ``loadView`` is the sole owner of that reset. This checks the other
+        half of the same bargain: once the list is rebuilt under a new filter,
+        the in-flight batch from the old filter must not be merged into it.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(3, 9, false);
+            state.viewerIndex = 2;
+            __viewer._nextAdded(3);
+            moveViewer(1);
+            __viewer._loadView();
+            __viewer._resetLibrary();      // generation + 1, items emptied
+            __viewer._releaseOk();         // the old batch arrives late
+            await __viewer._sleep(80);
+            console.log(JSON.stringify({
+              items: state.items.length,
+              index: state.viewerIndex,
+              toasts: __viewer._toasts(),
+              spinner: __viewer._pagingHidden(),
+              pending: state.viewerPendingAdvance,
+            }));
+            """
+        )
+        self.assertEqual(
+            result["items"],
+            0,
+            f"旧筛选的批次被并进了新筛选的列表：{result}",
+        )
+        self.assertEqual(result["index"], 2, result)
+        self.assertEqual(result["pending"], 0, result)
+        self.assertEqual(result["spinner"], True, result)
+
+    def test_closing_then_a_late_batch_moves_nothing(self) -> None:
+        """The token bump on close still holds with the new pending handling.
+
+        Regression guard for the interaction between the two self-found
+        fixes: the invalidation branch no longer clears the pending count, so
+        the close handler's reset is now load-bearing on its own.
+        """
+        result = self.run_viewer(
+            """
+            bindViewerEvents();
+            __viewer._seed(3, 9, false);
+            state.viewerIndex = 2;
+            __viewer._nextAdded(3);
+            moveViewer(1);
+            moveViewer(1);                 // two presses queued
+            __viewer._close();
+            const afterClose = {
+              pending: state.viewerPendingAdvance,
+              spinner: __viewer._pagingHidden(),
+            };
+            __viewer._releaseOk();
+            await __viewer._sleep(80);
+            console.log(JSON.stringify({
+              afterClose,
+              index: state.viewerIndex,
+              items: state.items.length,
+              toasts: __viewer._toasts(),
+              spinner: __viewer._pagingHidden(),
+            }));
+            """
+        )
+        self.assertEqual(result["afterClose"]["pending"], 0, result)
+        self.assertEqual(result["afterClose"]["spinner"], True, result)
+        self.assertEqual(
+            result["index"], 2, f"关闭后迟到的批次移动了 viewer：{result}"
+        )
+        self.assertEqual(result["items"], 6, result)
+        self.assertEqual(result["spinner"], True, result)
+
+
+class QuarantineProgressCacheQATests(unittest.TestCase):
+    """Round 2 for line B: does the new invalidation criterion cover reality?
+
+    The criterion moved from ``done`` to ``stage == "complete"``, which is the
+    right instinct -- the idle payload is also ``done``. But it now misses the
+    case where a run fails *after* files have been moved.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.photos = self.root / "photos"
+        self.photos.mkdir()
+        self.config = ConfigStore(self.root / "config.json")
+        self.config.data["default_cache_root"] = str(self.root / "cache")
+        self.config.save()
+        self.manager = ProjectManager(self.config)
+        self.project = self.manager.open(str(self.photos))
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def prepare(self, names: list[str]) -> None:
+        for index, name in enumerate(names):
+            Image.new("RGB", (64, 48), (10 + index * 7, 20, 30)).save(
+                self.photos / name
+            )
+        scanner = Scanner(self.config, self.manager)
+        scanner.start(self.project.project_id)
+        scanner.threads[self.project.project_id].join(60)
+        with closing(connect_db(self.project.db_path)) as conn:
+            conn.execute("UPDATE photos SET decision='remove'")
+            conn.commit()
+
+    def poll_handler(self, application: http_api.ApplicationContext) -> Any:
+        context = application
+        project_id = self.project.project_id
+
+        class FakeHandler:
+            application = context
+
+            @property
+            def quarantine_runner(self):
+                return context.quarantine_runner
+
+            @property
+            def similarity_groups(self):
+                return context.similarity_groups
+
+            def _query(self):
+                return {"project_id": [project_id]}
+
+            def _send_json(self, payload):
+                self.payload = payload
+
+        return FakeHandler()
+
+    def context_for(self, runner: Any) -> Any:
+        """A stand-in exposing only what ``api_quarantine_progress`` reads.
+
+        ``ApplicationContext`` is a frozen dataclass, so a runner cannot be
+        swapped into one after construction. Rather than fight that, this
+        exposes the two attributes the route actually touches and records the
+        invalidations for assertion.
+        """
+        cache = SimilarityGroupCache()
+        self._invalidations = []
+        cache.invalidate = self._invalidations.append  # type: ignore[method-assign]
+
+        class Context:
+            quarantine_runner = runner
+
+        context = Context()
+        context.similarity_groups = cache  # type: ignore[attr-defined]
+        return context
+
+    @property
+    def invalidations(self) -> list[str]:
+        return getattr(self, "_invalidations", [])
+
+    def test_a_successful_run_invalidates_the_similarity_cache(self) -> None:
+        """The positive case must keep working after the criterion change."""
+        self.prepare(["s1.jpg", "s2.jpg"])
+        application = http_api.ApplicationContext(
+            self.config,
+            self.manager,
+            Scanner(self.config, self.manager),
+            SimilarityGroupCache(),
+            "test-token",
+            Path("web"),
+        )
+        application.quarantine_runner.start(self.project.project_id)
+        for _ in range(600):
+            if application.quarantine_runner.get_progress(
+                self.project.project_id
+            ).get("done"):
+                break
+            time.sleep(0.02)
+        handler = self.poll_handler(
+            self.context_for(application.quarantine_runner)
+        )
+        http_api.Handler.api_quarantine_progress(handler)
+        self.assertEqual(handler.payload.get("stage"), "complete", handler.payload)
+        self.assertEqual(
+            self.invalidations,
+            [self.project.project_id],
+            "成功跑完一批必须作废相似连拍缓存",
+        )
+
+    def test_a_failure_before_any_move_leaves_the_cache_alone(self) -> None:
+        """A run that never touched a file must not drop the cache.
+
+        This is the case the new criterion was written for, and it must not
+        regress into the old over-eager behaviour.
+        """
+
+        def refuse(project_id: str, label: str):
+            raise ValueError("项目正在执行其他任务")
+
+        runner = http_api.QuarantineRunner(self.manager, refuse)
+        runner.start(self.project.project_id)
+        for _ in range(600):
+            if runner.get_progress(self.project.project_id).get("done"):
+                break
+            time.sleep(0.02)
+        handler = self.poll_handler(self.context_for(runner))
+        http_api.Handler.api_quarantine_progress(handler)
+        self.assertEqual(handler.payload.get("stage"), "error", handler.payload)
+        self.assertEqual(
+            self.invalidations, [], "一个文件都没动过，不该作废相似连拍缓存"
+        )
+
+    def test_defect_a_failure_after_the_move_never_invalidates_the_cache(self) -> None:
+        """A run that fails *after* moving files must still clear the cache.
+
+        ``run_quarantine_batch`` calls ``rebuild_capture_variants`` (line 281)
+        and ``_write_manifest_csv`` (line 283) **after** every file has been
+        moved and the photos table updated. If either raises, ``_run`` reports
+        ``stage="error"`` -- so the new ``stage == "complete"`` criterion skips
+        the invalidation, and the cache keeps describing a library whose photos
+        have already been moved into quarantine.
+
+        Reverse proof: with the criterion widened to "a run that got as far as
+        moving files", this reports ``[project_id]``. As written it reports
+        ``[]`` while the DB says every photo is ``quarantined``.
+        """
+        self.prepare(["v1.jpg", "v2.jpg"])
+        runner = http_api.QuarantineRunner(
+            self.manager, Scanner(self.config, self.manager).project_operation
+        )
+        with mock.patch(
+            "cullumi.quarantine_service.rebuild_capture_variants",
+            side_effect=RuntimeError("variant rebuild boom"),
+        ):
+            runner.start(self.project.project_id)
+            for _ in range(600):
+                if runner.get_progress(self.project.project_id).get("done"):
+                    break
+                time.sleep(0.02)
+        progress = runner.get_progress(self.project.project_id)
+        self.assertEqual(progress["stage"], "error", progress)
+        # The files really did move before the failure...
+        self.assertFalse((self.photos / "v1.jpg").exists())
+        self.assertFalse((self.photos / "v2.jpg").exists())
+        with closing(connect_db(self.project.db_path)) as conn:
+            rows = conn.execute("SELECT status FROM photos").fetchall()
+        self.assertEqual(
+            {row["status"] for row in rows}, {"quarantined"}, rows
+        )
+
+        handler = self.poll_handler(self.context_for(runner))
+        http_api.Handler.api_quarantine_progress(handler)
+        # Photos are gone from the library but the cache still describes them.
+        self.assertEqual(
+            self.invalidations,
+            [self.project.project_id],
+            "文件已经搬走却因 stage=error 不作废缓存，缓存将长期描述一批不存在的照片",
+        )
 
 
 if __name__ == "__main__":

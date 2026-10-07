@@ -606,6 +606,40 @@
   min-width: 0;
 }
 
+/* 「下一张」触发的续页指示。
+   位置在位置指示（#viewerIndex）旁边而不是盖住照片：续页期间画面仍停在当前
+   这张上，任何遮挡都会让用户以为照片被换掉了。 */
+.viewer .viewer-paging {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.viewer .viewer-paging::before {
+  content: "";
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  margin-right: 6px;
+  border: 2px solid var(--muted);
+  border-top-color: transparent;
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: viewer-paging-spin .7s linear infinite;
+}
+
+@keyframes viewer-paging-spin {
+  to {
+    transform: rotate(360deg)
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .viewer .viewer-paging::before {
+    animation: none
+  }
+}
+
 /* 右列：适应 / 查看原图 合成一个分段控件（互斥状态用互斥控件表达），
    靠 footer 右缘对齐。二者是「怎么看」。 */
 .viewer .viewer-zoom-group {

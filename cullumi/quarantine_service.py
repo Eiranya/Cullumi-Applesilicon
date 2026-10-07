@@ -5,12 +5,13 @@ import json
 import re
 import shutil
 import sqlite3
+import threading
 import uuid
 from contextlib import closing
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, ContextManager
 
 from .capture_variants import rebuild_capture_variants
 from .fs_utils import atomic_write_json, is_within
@@ -180,9 +181,38 @@ def _record_quarantined_item(
     conn.commit()
 
 
-def apply_quarantine(project: Project) -> dict[str, Any]:
+def _new_batch_id() -> str:
+    return f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:8]}"
+
+
+def _quarantine_counts(manifest: list[dict[str, Any]]) -> dict[str, int]:
+    """Tally a manifest into the counts the UI reports.
+
+    ``skipped`` stays "everything that did not move" for backwards
+    compatibility with the original return value, but ``failed`` is broken out
+    on purpose: a file that could not be moved is a different fact from one
+    that was never eligible (missing / changed on disk), and folding the two
+    together is what let a partly-failed run read as a clean one.
+    """
+    moved = sum(1 for row in manifest if row["status"] == "moved")
+    failed = sum(1 for row in manifest if row["status"] == "error")
+    return {
+        "moved": moved,
+        "failed": failed,
+        "skipped": len(manifest) - moved,
+    }
+
+
+def prepare_quarantine_batch(
+    project: Project, batch_id: str
+) -> tuple[Path, Path, list[dict[str, Any]], list[_PreparedQuarantine]]:
+    """Create the batch directory, seed the manifest and register the batch.
+
+    Split out of :func:`run_quarantine_batch` so the background task can report
+    a real ``total`` (and a real batch_id) before any file has moved. The order
+    of operations here is unchanged from the original synchronous function.
+    """
     preview = quarantine_preview(project)
-    batch_id = f"{datetime.now():%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:8]}"
     batch_root = _quarantine_batch_root(project, batch_id)
     manifest: list[dict[str, Any]] = []
     prepared: list[_PreparedQuarantine] = []
@@ -201,31 +231,239 @@ def apply_quarantine(project: Project) -> dict[str, Any]:
             (batch_id, datetime.now().isoformat(timespec="seconds"), str(manifest_path), 0, 0),
         )
         conn.commit()
-        for candidate in prepared:
+    return manifest_path, batch_root, manifest, prepared
+
+
+def run_quarantine_batch(
+    project: Project,
+    batch_id: str,
+    manifest_path: Path,
+    batch_root: Path,
+    manifest: list[dict[str, Any]],
+    prepared: list[_PreparedQuarantine],
+    report: Callable[[dict[str, Any]], None],
+) -> dict[str, Any]:
+    """Move every prepared item into quarantine, reporting progress as it goes.
+
+    The body is the original loop verbatim: same order, same per-item error
+    tolerance (one failure records ``status="error"`` and the run continues),
+    same manifest flush per item, no rollback. ``report`` is the only addition.
+    """
+    total = len(prepared)
+    report({"current": 0, "total": total, "current_file": "", "moved": 0, "failed": 0})
+    with closing(connect_db(project.db_path)) as conn:
+        for index, candidate in enumerate(prepared, start=1):
             status = _prepared_quarantine_status(candidate)
             if status:
                 candidate.entry["status"] = status
                 atomic_write_json(manifest_path, manifest)
-                continue
-            try:
-                _move_quarantine_assets(candidate.moves)
-            except Exception as error:
-                candidate.entry["status"] = "error"
-                candidate.entry["error"] = str(error)
             else:
-                candidate.entry["status"] = "moved"
-            atomic_write_json(manifest_path, manifest)
-            if candidate.entry["status"] == "moved":
-                _record_quarantined_item(conn, batch_id, manifest, candidate.entry)
+                try:
+                    _move_quarantine_assets(candidate.moves)
+                except Exception as error:
+                    candidate.entry["status"] = "error"
+                    candidate.entry["error"] = str(error)
+                else:
+                    candidate.entry["status"] = "moved"
+                atomic_write_json(manifest_path, manifest)
+                if candidate.entry["status"] == "moved":
+                    _record_quarantined_item(conn, batch_id, manifest, candidate.entry)
+            counts = _quarantine_counts(manifest)
+            report(
+                {
+                    "current": index,
+                    "total": total,
+                    "current_file": str(candidate.entry.get("relative_path") or ""),
+                    "moved": counts["moved"],
+                    "failed": counts["failed"],
+                }
+            )
         rebuild_capture_variants(conn, prune_similar=True)
         conn.commit()
     _write_manifest_csv(batch_root, manifest)
-    moved = [row for row in manifest if row["status"] == "moved"]
-    return {
-        "batch_id": batch_id,
-        "moved": len(moved),
-        "skipped": len(manifest) - len(moved),
-    }
+    counts = _quarantine_counts(manifest)
+    return {"batch_id": batch_id, **counts}
+
+
+def apply_quarantine(project: Project) -> dict[str, Any]:
+    """Apply a quarantine batch synchronously (kept for tests and scripting).
+
+    The HTTP route no longer calls this -- it starts a background task instead
+    (see :class:`QuarantineRunner`) -- but the behaviour and the return value are
+    unchanged, and the tests drive this entry point directly.
+    """
+    batch_id = _new_batch_id()
+    manifest_path, batch_root, manifest, prepared = prepare_quarantine_batch(
+        project, batch_id
+    )
+    return run_quarantine_batch(
+        project,
+        batch_id,
+        manifest_path,
+        batch_root,
+        manifest,
+        prepared,
+        lambda _progress: None,
+    )
+
+
+@dataclass
+class _TaskProgress:
+    """Mutable progress record for one background quarantine run.
+
+    Deliberately a separate store from :attr:`Scanner.progress`: a scan is
+    keyed by project and reports a *stage*, while a quarantine run is keyed by
+    batch and reports a *count*. Sharing one dict would have made the two
+    overwrite each other's ``stage``/``done`` fields and required a
+    discriminated-union payload at every reader. The lookup-and-lock
+    discipline is what is worth sharing, and that is inherited from the same
+    shape rather than the same object.
+    """
+
+    batch_id: str
+    stage: str = "preparing"
+    current: int = 0
+    total: int = 0
+    current_file: str = ""
+    moved: int = 0
+    failed: int = 0
+    done: bool = False
+    error: str = ""
+    # True once at least one file has actually left its original location.
+    #
+    # 这个字段是为了区分两种「失败」：搬**之前**失败（例如 project_operation
+    # 被占、批次目录建不出来）——一个文件都没动，缓存仍然描述真实的库，不该作废；
+    # 搬**之后**失败（rebuild_capture_variants / _write_manifest_csv 抛异常）——
+    # 文件已经在磁盘上不在库里，缓存若不作废就会长期描述一批不存在的照片。
+    # 只看 stage 无法区分：两种情况都是 stage="error"。
+    moved_any: bool = False
+    result: dict[str, Any] = field(default_factory=dict)
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "batch_id": self.batch_id,
+            "stage": self.stage,
+            "current": self.current,
+            "total": self.total,
+            "current_file": self.current_file,
+            "moved": self.moved,
+            "failed": self.failed,
+            "done": self.done,
+            "error": self.error,
+            "moved_any": self.moved_any,
+            **({"result": self.result} if self.result else {}),
+        }
+
+
+class QuarantineRunner:
+    """Runs :func:`apply_quarantine` on a background thread, one run per project.
+
+    Mirrors :class:`Scanner`'s discipline -- a lock-protected dict of progress
+    records, a thread per key, and a cheap ``get_progress`` for the poller --
+    but keyed by project with at most one live run, because two concurrent
+    quarantine runs on one library would race on the manifest and on
+    ``rebuild_capture_variants``.
+    """
+
+    def __init__(
+        self,
+        manager: Any,
+        operation: Callable[[str, str], ContextManager[Any]],
+    ) -> None:
+        self._manager = manager
+        self._operation = operation
+        self._lock = threading.RLock()
+        self._progress: dict[str, _TaskProgress] = {}
+        self._threads: dict[str, threading.Thread] = {}
+
+    def get_progress(self, project_id: str) -> dict[str, Any]:
+        with self._lock:
+            record = self._progress.get(project_id)
+        if record is None:
+            return {"stage": "idle", "done": True}
+        return record.payload()
+
+    def start(self, project_id: str) -> dict[str, Any]:
+        """Start a run and return immediately with its batch id.
+
+        Returns ``{"batch_id", "started"}``. ``started`` is False when a run is
+        already in flight for this project, so the caller can tell "already
+        working on it" apart from "here is your batch to poll".
+        """
+        with self._lock:
+            existing = self._threads.get(project_id)
+            if existing is not None and existing.is_alive():
+                return {"batch_id": self._progress[project_id].batch_id, "started": False}
+            batch_id = _new_batch_id()
+            record = _TaskProgress(batch_id=batch_id)
+            self._progress[project_id] = record
+            thread = threading.Thread(
+                target=self._run, args=(project_id, record), daemon=True
+            )
+            self._threads[project_id] = thread
+        thread.start()
+        return {"batch_id": batch_id, "started": True}
+
+    def _update(self, record: _TaskProgress, **values: Any) -> None:
+        with self._lock:
+            for key, value in values.items():
+                setattr(record, key, value)
+
+    def _reporter(self, record: _TaskProgress) -> Callable[[dict[str, Any]], None]:
+        """Adapt ``run_quarantine_batch``'s report callback to the record.
+
+        The per-item ``moved`` count is what tells us a file genuinely left its
+        original location, so ``moved_any`` is latched from it as the run
+        progresses rather than only at the end -- a later bookkeeping failure
+        must not be able to hide the fact that files were already moved.
+        """
+
+        def report(progress: dict[str, Any]) -> None:
+            self._update(record, **progress)
+            if progress.get("moved"):
+                self._update(record, moved_any=True)
+
+        return report
+
+    def _run(self, project_id: str, record: _TaskProgress) -> None:
+        try:
+            # 两层锁都必须保留，缺一不可（这是从同步 handler 拆到线程时最容易丢的一层）：
+            #   project_operation —— 一个项目同时只做一件事，扫描也要抢它；
+            #   data_operation   —— 写入不得与缓存迁移交叉（见 project_store 的
+            #                       docstring），apply_profile 与迁移缓存的路由都取它。
+            # 后者与前者语义不同，不是冗余：少了它，后台隔离会在 apply_profile
+            # 搬迁缓存的同时搬照片。
+            with self._operation(project_id, "隔离照片"):
+                with self._manager.data_operation(project_id):
+                    project = self._manager.from_id(project_id)
+                    manifest_path, batch_root, manifest, prepared = (
+                        prepare_quarantine_batch(project, record.batch_id)
+                    )
+                    self._update(record, stage="moving", total=len(prepared))
+                    result = run_quarantine_batch(
+                        project,
+                        record.batch_id,
+                        manifest_path,
+                        batch_root,
+                        manifest,
+                        prepared,
+                        self._reporter(record),
+                    )
+                    # Belt and braces: the live report already flipped
+                    # moved_any on the first successful move, but derive it from
+                    # the final counts too so the flag cannot be left false
+                    # after a run that demonstrably moved something.
+                    self._update(
+                        record, moved_any=record.moved_any or result["moved"] > 0
+                    )
+            self._update(record, stage="complete", done=True, result=result)
+        except Exception as error:
+            self._update(
+                record,
+                stage="error",
+                done=True,
+                error=str(error) or error.__class__.__name__,
+            )
 
 @dataclass(frozen=True)
 class _RestorePaths:

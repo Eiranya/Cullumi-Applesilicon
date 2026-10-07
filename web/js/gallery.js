@@ -182,10 +182,30 @@ function renderLibraryEmpty(message) {
   };
   $("#gallery").innerHTML = "";
   $("#librarySentinel").classList.add("hidden");
-  $("#viewSubtitle").textContent = "显示 0 / 0";
+  updateLibrarySubtitle();
   $("#emptyTitle").textContent = "当前筛选没有结果";
   $("#emptyText").textContent = message;
   $("#empty").classList.remove("hidden");
+}
+// 「已加载 N / 共 M」指示器。
+//
+// 每批量按用户决定保持 120 不变，但这个计数此前太不显眼——它和标题挤在同一行、
+// 字号一样，用户看不出「库里还有 247 张没读进来」，于是走到末尾照片突然跳回第一张
+// 时完全无法解释。现在：还没取完时加上「继续加载」的前缀，并挂一个高亮类，
+// 让「还有更多」这件事在滚动浏览时就一直可见。
+function updateLibrarySubtitle() {
+  const subtitle = $("#viewSubtitle");
+  if (!subtitle) return;
+  const loaded = state.items.length,
+    total = state.library.total;
+  const partial = total > loaded;
+  subtitle.textContent = partial
+    ? `已加载 ${loaded} / 共 ${total} 张（继续加载）`
+    : `已加载全部 ${total} 张`;
+  subtitle.classList.toggle("is-partial", partial);
+  subtitle.title = partial
+    ? `还有 ${total - loaded} 张没有读入，滚动到底或按「下一张」会自动加载`
+    : "全部照片都已加载";
 }
 async function loadLibraryPage(reset = false) {
   if (!state.project || state.view !== "library") return;
@@ -252,8 +272,7 @@ async function loadLibraryPage(reset = false) {
         )
         .join(""),
     );
-    $("#viewSubtitle").textContent =
-      `显示 ${state.items.length} / ${data.total}`;
+    updateLibrarySubtitle();
     $("#empty").classList.toggle("hidden", !!state.items.length);
     if (!state.items.length) {
       $("#emptyTitle").textContent = "这里还没有内容";
@@ -273,6 +292,14 @@ async function loadLibraryPage(reset = false) {
 }
 async function loadView() {
   if (!state.project) return;
+  // 换视图 / 换筛选 / 换排序 / 换搜索词都经过这里，而它们都会让 state.items
+  // 整体重建。于是任何在途的「下一张续页」都已失去意义：作废代次，批次到货后
+  // 只补列表、不再移动 viewerIndex。这是防止「续页到了但 viewerIndex 指向
+  // 已不存在的条目」的关键一环——列表换了一整批，旧下标没有任何意义。
+  state.viewerPageToken += 1;
+  state.viewerPendingAdvance = 0;
+  state.viewerPageLoading = false;
+  setViewerPagingIndicator(false);
   const search = encodeURIComponent($("#searchInput").value.trim());
   document.body.classList.toggle("similar-view-open", state.view === "similar");
   applySimilarMode();
@@ -489,8 +516,7 @@ function reconcileLibraryDecision(id) {
   state.items = state.items.filter((item) => item.id !== id);
   state.library.offset = Math.max(0, state.library.offset - 1);
   state.library.total = Math.max(0, state.library.total - 1);
-  $("#viewSubtitle").textContent =
-    `显示 ${state.items.length} / ${state.library.total}`;
+  updateLibrarySubtitle();
   if (!state.items.length && state.library.done) {
     $("#emptyTitle").textContent = "这里还没有内容";
     $("#emptyText").textContent = "没有照片符合当前组合筛选。";
@@ -527,8 +553,7 @@ function adjustUnloadedLibraryTotal(photo) {
   if (before === after) return;
   state.library.total = Math.max(0, state.library.total + (after ? 1 : -1));
   state.library.done = state.library.offset >= state.library.total;
-  $("#viewSubtitle").textContent =
-    `显示 ${state.items.length} / ${state.library.total}`;
+  updateLibrarySubtitle();
 }
 function moveViewerPastAffected(affectedIds) {
   for (let offset = 1; offset < state.items.length; offset += 1) {
@@ -629,6 +654,101 @@ async function setDecision(id, decision, fromViewer = true) {
   }
   return true;
 }
+// 隔离进度浮条的呈现。
+//
+// 浮条刻意不锁界面：隔离是后台任务，用户可以一边隔离一边继续浏览照片，
+// 所以这里只更新右下角那一小块，不做任何遮罩、不禁用按钮。
+//
+// 失败数单独摆出来（Q13=b 的直接后果）：一张失败、其余继续是既有行为，
+// 但如果失败数混在「跳过」里，用户会以为这批干净结束了。
+function quarantineProgressShow(title) {
+  const panel = $("#quarantineProgress");
+  panel.classList.remove("hidden", "is-fading");
+  $("#quarantineProgressTitle").textContent = title;
+  $("#quarantineProgressDetail").textContent = "";
+  $("#quarantineProgressBar").style.width = "0%";
+  $("#quarantineProgressDone").classList.add("hidden");
+}
+function quarantineProgressHide() {
+  const panel = $("#quarantineProgress");
+  panel.classList.add("is-fading");
+  setTimeout(() => {
+    panel.classList.add("hidden");
+    panel.classList.remove("is-fading");
+  }, 450);
+}
+function quarantineProgressRender(p) {
+  const total = p.total || 0,
+    current = p.current || 0;
+  $("#quarantineProgressDetail").textContent = total
+    ? `${current} / ${total} 张${p.current_file ? " · " + p.current_file.split("/").pop() : ""}`
+    : "正在准备…";
+  $("#quarantineProgressBar").classList.toggle("indeterminate", !p.done && !total);
+  $("#quarantineProgressBar").style.width = total
+    ? `${Math.round((100 * current) / total)}%`
+    : p.done
+      ? "100%"
+      : "35%";
+}
+// 完成行：「完成：已隔离 N 张 · 撤销」，失败数若有则一并说明。
+function quarantineProgressFinish(result) {
+  const moved = result.moved || 0,
+    failed = result.failed || 0;
+  const text = failed
+    ? `完成：已隔离 ${moved} 张 · ${failed} 张失败`
+    : `完成：已隔离 ${moved} 张`;
+  $("#quarantineProgressTitle").textContent = "隔离完成";
+  $("#quarantineProgressDetail").textContent = failed
+    ? "失败的照片仍留在原处，可再次隔离"
+    : "";
+  $("#quarantineProgressBar").style.width = "100%";
+  $("#quarantineProgressBar").classList.remove("indeterminate");
+  $("#quarantineProgressDone").classList.remove("hidden");
+  $("#quarantineProgressDoneText").textContent = text;
+  $("#quarantineUndoBtn").dataset.batch = result.batch_id || "";
+  if (failed) toast(`${text}（${failed} 张未能移入隔离区）`);
+  else toast(text);
+}
+async function pollQuarantineProgress(projectId, batchId) {
+  while (state.project?.id === projectId) {
+    let p;
+    try {
+      p = await json(`/api/quarantine/progress?project_id=${encodeURIComponent(projectId)}`);
+    } catch (error) {
+      toast(`读取隔离进度失败：${error.message}`);
+      quarantineProgressHide();
+      return;
+    }
+    // 换了项目就停止轮询：进度属于刚才那个项目的批次。
+    if (state.project?.id !== projectId) return;
+    if (p.batch_id && batchId && p.batch_id !== batchId) {
+      // 后来的批次接管了这个项目的进度槽位（用户又点了一次隔离）。
+      return;
+    }
+    if (p.stage === "error") {
+      quarantineProgressFinish({ batch_id: batchId, moved: p.moved, failed: 0 });
+      $("#quarantineProgressTitle").textContent = "隔离失败";
+      $("#quarantineProgressDetail").textContent = p.error || "";
+      toast(`隔离失败：${p.error || "未知错误"}`);
+      await refreshProject();
+      loadView();
+      return;
+    }
+    if (!p.done) {
+      quarantineProgressRender(p);
+      await wait(500);
+      continue;
+    }
+    const result = p.result || { batch_id: batchId, moved: p.moved, failed: p.failed };
+    quarantineProgressFinish(result);
+    await refreshProject();
+    loadView();
+    setTimeout(quarantineProgressHide, 6000);
+    return;
+  }
+  // 项目已切换：收掉浮条，别把上一个项目的进度留在屏幕上。
+  quarantineProgressHide();
+}
 async function quarantine() {
   const d = await json(
     `/api/quarantine/preview?project_id=${state.project.id}`,
@@ -644,12 +764,17 @@ async function quarantine() {
   button.textContent = "确认隔离";
   button.onclick = async () => {
     $("#confirm").close();
+    const projectId = state.project.id;
+    quarantineProgressShow("正在隔离");
+    // apply 立刻返回 batch_id，隔离在后台线程里跑。
     const r = await json("/api/quarantine/apply", {
-      project_id: state.project.id,
+      project_id: projectId,
     });
-    toast(`已隔离 ${r.moved} 张，跳过 ${r.skipped} 张`);
-    await refreshProject();
-    loadView();
+    if (!r.started) {
+      // 上一次隔离还在跑。不重复发起，接着看同一条进度。
+      toast("已有一个隔离任务在进行中");
+    }
+    pollQuarantineProgress(projectId, r.batch_id);
   };
   $("#confirm").showModal();
 }
@@ -795,6 +920,18 @@ function bindGalleryEvents() {
     }
   };
   $("#quarantineBtn").onclick = quarantine;
+  // 「撤销」= 恢复刚跑完的那一个批次。
+  //
+  // 语义成立的原因：一次 apply 恰好产生一个批次，batch_id 就是这次操作的
+  // 全部产物，所以 restore_batch(batch_id) 撤销的就是这一次，不多也不少
+  // （manifest 里 status=="error" 的条目本来就没搬走，restore 会跳过它们）。
+  // 因此这里可以复用既有的确认弹窗，而不是新造一个语义含糊的按钮。
+  $("#quarantineUndoBtn").onclick = () => {
+    const batch = $("#quarantineUndoBtn").dataset.batch;
+    if (!batch) return;
+    quarantineProgressHide();
+    confirmRestore(batch);
+  };
   $("#clearDecisionsBtn").onclick = confirmClearDecisions;
   $("#acceptSuggestionsBtn").onclick = confirmAcceptSuggestions;
   const main = document.querySelector("body > main");
