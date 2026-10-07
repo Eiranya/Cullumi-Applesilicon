@@ -227,6 +227,11 @@ def run() -> None:
     port = server.server_address[1]
     url = f"http://127.0.0.1:{port}/?token={TOKEN}"
     print(url)
+    # 启动留痕：这一行让「日志里什么都没有」可以被区分开——是 app 根本没起来，
+    # 还是起来了但前端没有发起任何图片请求。冻结包的 stdout 会被丢弃，所以
+    # 只靠 print 无法在用户机器上取证。刻意不写 token：它是本次会话的凭据，
+    # 而这一行的用途只是确认进程走到了这里。
+    logging.getLogger(__name__).warning("app ready port=%s", port)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:

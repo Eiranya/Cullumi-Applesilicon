@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -99,6 +100,7 @@ GET_ROUTES = {
     "/api/quarantine/batches": "api_batches",
 }
 POST_ROUTES = {
+    "/api/diagnostics/viewer": "api_diagnostics_viewer",
     "/api/choose-folder": "api_choose_folder",
     "/api/choose-cache": "api_choose_cache",
     "/api/choose-csv": "api_choose_csv",
@@ -597,6 +599,27 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as error:
             self._handle_error(error)
 
+    def api_diagnostics_viewer(self) -> None:
+        """Record what the viewer is actually displaying.
+
+        Blurriness complaints could not be settled by reading the code: every
+        layer reported plausible numbers, and the only thing that settles it is
+        what the browser measured at the moment of the complaint. The front end
+        posts naturalWidth / offsetWidth / devicePixelRatio / the current scale
+        and the URL it holds, so the log shows whether the right bitmap ever
+        arrived and, if it did, how it was being rasterised.
+
+        This is a read-only sink. It never influences what is displayed, which
+        matters — a diagnostic that perturbs the thing it measures is worthless.
+
+        Logged at WARNING because the root logger sits at WARNING (see
+        ``app.configure_logging``); an INFO record would be discarded before it
+        reached the file, which is precisely the failure this endpoint exists to
+        prevent.
+        """
+        logging.getLogger(__name__).warning("viewer-diag %s", self._body())
+        self._send_json({"ok": True})
+
     def api_bootstrap(self) -> None:
         config_data = self.config.snapshot()
         recent = []
@@ -629,6 +652,13 @@ class Handler(BaseHTTPRequestHandler):
                 "sync_variant_decisions": config_data.get(
                     "sync_variant_decisions", True
                 ),
+                "viewer_wheel_trackpad_sensitivity": config_data.get(
+                    "viewer_wheel_trackpad_sensitivity", 1.0
+                ),
+                "viewer_wheel_mouse_sensitivity": config_data.get(
+                    "viewer_wheel_mouse_sensitivity", 1.0
+                ),
+                "viewer_wheel_device": config_data.get("viewer_wheel_device", "auto"),
                 "theme": config_data.get("theme", "day"),
             },
             "recent_projects": recent,
@@ -719,6 +749,17 @@ class Handler(BaseHTTPRequestHandler):
         # 恰好够宽的 JPEG 预览图。不带 w 的链接（旧链接 / 项目封面 / 动态照片封面）
         # 沿用历史行为。
         raw = self._query().get("w", [""])[0]
+        # 供给取证：记录每一次图片请求实际拿到的是哪一档、什么尺寸。
+        #
+        # 为什么要留在产品代码里：查看器「放大后糊」的问题在浏览器侧查不到——
+        # 前端上报会被静默吞掉，页面里的状态提示又可以是错的（它按数据库里的
+        # 原图宽度判断「已到上限」，而不是按位图实际宽度）。服务端日志是唯一
+        # 一定能落盘的一环：它直接回答「浏览器到底拉过哪几档」。一行 WARNING，
+        # 代价可忽略。
+        logging.getLogger(__name__).warning(
+            "photo-serve w=%s path=%s",
+            raw or "(original)", row["relative_path"],
+        )
         if raw:
             try:
                 width = int(raw)

@@ -28,15 +28,13 @@ function handleGlobalKeydown(event) {
   // F 此前是「切换显示格式」的循环键，该功能已撤回，这里改为「载入原图」——
   // 同一个物理键现在服务于「看清细节」这个仍然存在的需求。
   //
-  // 1 / 0 沿用看图软件的惯例（1 = 原始像素，0 = 适应窗口），且与既有绑定零冲突：
-  // 查看器此前没有占用任何数字键。
+  // 0 沿用看图软件的惯例（0 = 适应窗口），且与既有绑定零冲突。
+  //
+  // 1:1 已按用户裁决撤销快捷键：它不再是用户手动触发的入口，而由「查看原图」
+  // 载入原图到货后的自动落位触发（见 viewer.js 的 loadViewerTier）。因此这里
+  // 不再占用 `1`——数字键现在只管 `0`（适应窗口）。
   if (key === "f") {
     loadViewerOriginal();
-    event.preventDefault();
-    return;
-  }
-  if (key === "1") {
-    toggleViewerOneToOne();
     event.preventDefault();
     return;
   }

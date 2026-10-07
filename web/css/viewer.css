@@ -276,7 +276,17 @@
 
 .viewer #viewerImage {
   transform-origin: center center;
-  will-change: transform;
+  /* 这里**不能**有 will-change: transform。
+   *
+   * 它会把图片提升为独立合成图层，而图层按布局尺寸（被 .viewer img 的 max-width
+   * 压到 100vw-170px）栅格化一次；之后 transform: scale() 放大多少倍，都只是把那张
+   * 已栅格化的纹理拉大，浏览器不会按放大后的尺寸重新栅格化。
+   *
+   * 7010px 的照片放在约 3270px 的舞台上，1:1 需要放大 2.14 倍——「已 1:1」那一刻
+   * 看到的正是那张 3270px 纹理被拉了两倍，所以越放大越糊，且换多高的档位都救不
+   * 回来（位图早就够大了）。这条规则是为滚动性能加的，代价却是照片永远不清晰——
+   * 对一个看图软件来说这笔交易是错的。
+   */
   cursor: zoom-in;
   user-select: none;
   transition: transform 120ms ease;
@@ -568,15 +578,93 @@
   border-color: var(--line);
 }
 
+/* 三列网格：左列留空、中列放决策组、右列放分段控件。两侧列都取
+   minmax(0, 1fr)，宽度严格相等，中列的 auto 轨道因此恰好落在 footer
+   的正中——决策组真正居中，且不会被右侧的分段控件推偏。
+   之前用 flex + space-between，「保留 / N/M / 移除」只能贴左，右侧的
+   「适应 / 查看原图」一靠右就把中间的决策组顶走，这正是本次要修的问题。 */
 .viewer footer {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  justify-content: center;
   height: 84px;
-  gap: 40px;
+  gap: 24px;
+  padding: 0 clamp(16px, 3vw, 48px);
   color: var(--ink);
   background: var(--bg);
   border-top: 0;
+}
+
+/* 中列：决策按钮「保留 / N/M / 移除」是「做什么决定」，作为一组水平居中。
+   显式落位到第 2 列（第 1 列留空），两侧等宽 1fr 保证它落在 footer 正中。 */
+.viewer .viewer-decision-group {
+  grid-column: 2;
+  justify-self: center;
+  display: flex;
+  align-items: center;
+  gap: 40px;
+  min-width: 0;
+}
+
+/* 右列：适应 / 查看原图 合成一个分段控件（互斥状态用互斥控件表达），
+   靠 footer 右缘对齐。二者是「怎么看」。 */
+.viewer .viewer-zoom-group {
+  grid-column: 3;
+  justify-self: end;
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--card);
+}
+
+.viewer .viewer-zoom-group .viewer-zoom {
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+}
+
+.viewer .viewer-zoom-group .viewer-zoom:first-child {
+  border-left: 0;
+}
+
+.viewer .viewer-zoom-group .viewer-zoom:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--surface-hover);
+}
+
+/* 当前视图状态的高亮。分段控件里只剩「适应」需要 viewer-zoom-active（口径同
+   viewer-scale-hint：落在整幅显示且不是 1:1）；「查看原图」沿用既有的
+   viewer-original-loaded。1:1 无独立按钮，故不再有它专属的高亮。 */
+.viewer .viewer-zoom-group .viewer-zoom.viewer-zoom-active,
+.viewer .viewer-zoom-group .viewer-zoom.viewer-original-loaded {
+  background: var(--surface-hover-strong);
+  color: var(--ink);
+}
+
+/* 窄窗口：收窄间距与内边距，保证分段控件不溢出、不与决策按钮重叠。 */
+@media (max-width: 1100px) {
+  .viewer footer {
+    gap: 16px;
+    padding: 0 20px;
+  }
+
+  .viewer .viewer-decision-group {
+    gap: 20px;
+  }
+}
+
+@media (max-width: 850px) {
+  .viewer footer button {
+    min-width: 0;
+    padding-inline: 10px;
+  }
+
+  .viewer .viewer-zoom-group .viewer-zoom {
+    padding: 8px 10px;
+  }
 }
 
 .viewer .viewer-keep.active {

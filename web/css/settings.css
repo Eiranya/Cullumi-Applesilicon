@@ -485,6 +485,31 @@
   background:transparent;
 }
 
+/* 灵敏度滑杆：右侧固定宽度的读数，拖到哪读到哪。 */
+.settings-row.settings-range .setting-range {
+  display:flex;
+  flex:0 0 auto;
+  align-items:center;
+  gap:12px;
+  margin:0;
+}
+
+.settings-row.settings-range input[type="range"] {
+  width:180px;
+  height:4px;
+  margin:0;
+  accent-color:var(--pink);
+  cursor:pointer;
+}
+
+.settings-row.settings-range output {
+  min-width:42px;
+  text-align:right;
+  color:var(--muted);
+  font-size:12px;
+  font-variant-numeric:tabular-nums;
+}
+
 #settings .update-row {
   display:block;
   margin:0;
@@ -611,5 +636,9 @@
   .settings-row {
     gap:10px;
     padding-inline:10px;
+  }
+
+  .settings-row.settings-range input[type="range"] {
+    width:110px;
   }
 }

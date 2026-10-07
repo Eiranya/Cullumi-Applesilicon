@@ -1,0 +1,165 @@
+{
+  "ideal": "原图 LANCZOS 直接缩到渲染内容尺寸（已裁去留边）",
+  "rows": [
+    {
+      "dpr": 1,
+      "source_px": 128,
+      "content_size": [
+        215,
+        143
+      ],
+      "lapvar": 491.6,
+      "mse_vs_ideal": 95.58
+    },
+    {
+      "dpr": 1,
+      "source_px": 213,
+      "content_size": [
+        215,
+        143
+      ],
+      "lapvar": 851.8,
+      "mse_vs_ideal": 23.03
+    },
+    {
+      "dpr": 1,
+      "source_px": 256,
+      "content_size": [
+        215,
+        144
+      ],
+      "lapvar": 1091.8,
+      "mse_vs_ideal": 5.82
+    },
+    {
+      "dpr": 1,
+      "source_px": 341,
+      "content_size": [
+        215,
+        143
+      ],
+      "lapvar": 1194.5,
+      "mse_vs_ideal": 9.44
+    },
+    {
+      "dpr": 1,
+      "source_px": 426,
+      "content_size": [
+        215,
+        143
+      ],
+      "lapvar": 1210.4,
+      "mse_vs_ideal": 15.54
+    },
+    {
+      "dpr": 1,
+      "source_px": 512,
+      "content_size": [
+        215,
+        143
+      ],
+      "lapvar": 1216.5,
+      "mse_vs_ideal": 20.85
+    },
+    {
+      "dpr": 1,
+      "source_px": 1024,
+      "content_size": [
+        215,
+        143
+      ],
+      "lapvar": 1215.5,
+      "mse_vs_ideal": 37.05
+    },
+    {
+      "dpr": 1,
+      "source_px": 2048,
+      "content_size": [
+        215,
+        143
+      ],
+      "lapvar": 1217.3,
+      "mse_vs_ideal": 46.78
+    },
+    {
+      "dpr": 2,
+      "source_px": 128,
+      "content_size": [
+        430,
+        285
+      ],
+      "lapvar": 92.6,
+      "mse_vs_ideal": 139.66
+    },
+    {
+      "dpr": 2,
+      "source_px": 213,
+      "content_size": [
+        430,
+        287
+      ],
+      "lapvar": 199.1,
+      "mse_vs_ideal": 59.63
+    },
+    {
+      "dpr": 2,
+      "source_px": 256,
+      "content_size": [
+        430,
+        287
+      ],
+      "lapvar": 230.1,
+      "mse_vs_ideal": 42.28
+    },
+    {
+      "dpr": 2,
+      "source_px": 341,
+      "content_size": [
+        430,
+        287
+      ],
+      "lapvar": 290.6,
+      "mse_vs_ideal": 21.06
+    },
+    {
+      "dpr": 2,
+      "source_px": 426,
+      "content_size": [
+        430,
+        287
+      ],
+      "lapvar": 389.1,
+      "mse_vs_ideal": 10.97
+    },
+    {
+      "dpr": 2,
+      "source_px": 512,
+      "content_size": [
+        430,
+        287
+      ],
+      "lapvar": 497.7,
+      "mse_vs_ideal": 2.67
+    },
+    {
+      "dpr": 2,
+      "source_px": 1024,
+      "content_size": [
+        430,
+        287
+      ],
+      "lapvar": 553.4,
+      "mse_vs_ideal": 8.23
+    },
+    {
+      "dpr": 2,
+      "source_px": 2048,
+      "content_size": [
+        430,
+        287
+      ],
+      "lapvar": 552.1,
+      "mse_vs_ideal": 14.38
+    }
+  ]
+}

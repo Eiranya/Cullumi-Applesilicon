@@ -39,6 +39,23 @@ IMAGE_EXTENSIONS = {
 }
 DISPLAY_PREVIEW_EXTENSIONS = HEIF_EXTENSIONS | RAW_EXTENSIONS | {".tif", ".tiff"}
 DISPLAY_PREVIEW_MAX_SIZE = (2560, 2560)
+# 查看器显示预览的 JPEG 编码参数。
+#
+# subsampling=0 即 4:4:4（色度不抽样）。Pillow 对大图默认 4:2:0，把色度分辨率减半：
+# 实测 DSC02321.JPG（7008x4672）在 2048 档下 layers 为 [(1,2,2,0),...]，色度只有
+# 1024x683。4:4:4 把它变回 [(1,1,1,0),...]。实测体积 +17.7%（2048 档 0.506 ->
+# 0.596 MB）、+15.2%（4096 档 1.759 -> 2.026 MB），编码耗时不变（本就由解码主导）。
+# 色度的量化误差（MSE 1.37 / RMSE 1.17 per 255）数值不大，但恰好落在人眼对彩色
+# 边缘最敏感的频段——而「放大后发糊」正是这个投诉的落点。
+DISPLAY_PREVIEW_JPEG_QUALITY = 92
+DISPLAY_PREVIEW_JPEG_SUBSAMPLING = 0
+# 编码参数版本标记：并入缓存指纹。
+#
+# 必须有：指纹原本只由 (size, mtime_ns, max_size) 构成，不含编码参数。改了
+# subsampling 之后，旧指纹文件仍会被命中，于是「4:4:4」对已经缓存过的照片
+# 完全不生效——用户看到的还是上一轮 Pillow 默认编码的字节。这与
+# display_asset.ASSET_FORMAT_TAG 修过的是同一个坑（q90 4:2:0 -> q95 4:4:4）。
+DISPLAY_PREVIEW_FORMAT_TAG = "q92-s444"
 VIDEO_EXTENSIONS = {
     ".mov", ".mp4", ".m4v", ".avi", ".mkv", ".wmv", ".mts", ".m2ts",
     ".3gp", ".webm",
@@ -312,14 +329,29 @@ def display_preview_path(
     must not share one file, or whichever was built first would silently be
     served to the other (a "preview" that is blurrier than it claims, or a
     full-size render downloaded for a thumbnail-sized box).
+
+    ``DISPLAY_PREVIEW_FORMAT_TAG`` is in the fingerprint for the same reason:
+    encoder settings (quality, chroma subsampling) are part of the bytes. Leaving
+    them out means a change to them is invisible to photos already cached — the
+    old file keeps being served and the fix silently does nothing.
+
+    The width also appears in the *name*, not only in the hash. That is what
+    lets :func:`_prune_stale_display_previews` clean up one width without
+    touching the others: the viewer keeps several widths of the same photo alive
+    at once (2048 / 4096 / original), and the previous single-slot index deleted
+    whichever tier happened to be built second, forcing a full re-decode of the
+    source on every zoom step.
     """
     stat = source.stat()
     fingerprint = hashlib.sha1(
-        f"{stat.st_size}:{stat.st_mtime_ns}:{max_size[0]}x{max_size[1]}".encode(
-            "ascii"
-        )
+        (
+            f"{stat.st_size}:{stat.st_mtime_ns}:"
+            f"{max_size[0]}x{max_size[1]}:{DISPLAY_PREVIEW_FORMAT_TAG}"
+        ).encode("ascii")
     ).hexdigest()[:12]
-    return thumbnail.with_name(f"{thumbnail.stem}.display-{fingerprint}.jpg")
+    return thumbnail.with_name(
+        f"{thumbnail.stem}.display-w{max_size[0]}-{fingerprint}.jpg"
+    )
 
 
 _DISPLAY_LOCKS = [threading.Lock() for _ in range(64)]
@@ -359,31 +391,45 @@ def _ensure_display_preview(
     try:
         image, _ = open_image(source)
         image.thumbnail(max_size, Image.Resampling.LANCZOS)
-        image.save(temporary, "JPEG", quality=92, optimize=True)
+        image.save(
+            temporary,
+            "JPEG",
+            quality=DISPLAY_PREVIEW_JPEG_QUALITY,
+            subsampling=DISPLAY_PREVIEW_JPEG_SUBSAMPLING,
+            optimize=True,
+        )
         temporary.replace(target)
     finally:
         temporary.unlink(missing_ok=True)
         if image is not None:
             image.close()
 
-    index = thumbnail.with_suffix(".display-index")
-    try:
-        previous = index.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        previous = ""
-    index_tmp = index.with_name(f"{index.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        index_tmp.write_text(target.name, encoding="utf-8")
-        index_tmp.replace(index)
-    finally:
-        index_tmp.unlink(missing_ok=True)
-    if (previous and Path(previous).name == previous and previous != target.name
-            and previous.startswith(f"{thumbnail.stem}.display-") and previous.endswith(".jpg")):
+    _prune_stale_display_previews(thumbnail, max_size, target.name)
+    return target
+
+
+def _prune_stale_display_previews(
+    thumbnail: Path, max_size: tuple[int, int], keep_name: str
+) -> None:
+    """Delete stale fingerprints of the SAME width, keeping ``keep_name``.
+
+    Scope is deliberately one width. The viewer holds several renditions of one
+    photo at once (2048 / 4096 / original) and the previous single-slot
+    ``.display-index`` pruned whichever was built second -- so zooming in and
+    back out re-decoded the 20MB original every time, which is far slower than
+    the blur it was meant to fix. Within one width, only the fingerprint can go
+    stale (the source file changed), so that is all this needs to clean.
+
+    Best-effort: a cache that cannot be pruned must not fail the request.
+    """
+    width = max_size[0]
+    for stale in thumbnail.parent.glob(f"{thumbnail.stem}.display-w{width}-*.jpg"):
+        if stale.name == keep_name:
+            continue
         try:
-            (target.parent / previous).unlink(missing_ok=True)
+            stale.unlink(missing_ok=True)
         except OSError:
             pass
-    return target
 
 
 def _photo_analysis_base(path: Path, thumb_path: Path) -> dict[str, Any]:

@@ -1,0 +1,105 @@
+{
+  "sample": "DSC02017.JPG",
+  "source_size": [
+    7008,
+    4672
+  ],
+  "box_css_px": [
+    215,
+    161
+  ],
+  "method": "每个环节的产物都缩进同一 215px 显示盒后再测 lapvar",
+  "chain": [
+    {
+      "stage": "源文件（原始解码）",
+      "native_size": [
+        7008,
+        4672
+      ],
+      "onscreen_size": [
+        215,
+        143
+      ],
+      "lapvar_onscreen": 1355.9,
+      "note": "源 7008x4672"
+    },
+    {
+      "stage": "① draft() DCT 预缩后",
+      "native_size": [
+        876,
+        584
+      ],
+      "onscreen_size": [
+        215,
+        143
+      ],
+      "lapvar_onscreen": 1355.4,
+      "note": "draft 解到 876x584"
+    },
+    {
+      "stage": "② LANCZOS 收到 512 长边",
+      "native_size": [
+        512,
+        341
+      ],
+      "onscreen_size": [
+        215,
+        143
+      ],
+      "lapvar_onscreen": 1479.8,
+      "note": "产品写入磁盘前"
+    },
+    {
+      "stage": "③ JPEG q86 4:2:0 落盘",
+      "native_size": [
+        512,
+        341
+      ],
+      "onscreen_size": [
+        215,
+        143
+      ],
+      "lapvar_onscreen": 1481.6,
+      "note": "磁盘上的缩略图 = 实际屏上所用"
+    },
+    {
+      "stage": "③' 编码 q95 4:4:4（其余不变）",
+      "native_size": [
+        512,
+        341
+      ],
+      "onscreen_size": [
+        215,
+        143
+      ],
+      "lapvar_onscreen": 1482.9,
+      "note": "隔离编码环节"
+    },
+    {
+      "stage": "③' 编码 q95 4:2:0（其余不变）",
+      "native_size": [
+        512,
+        341
+      ],
+      "onscreen_size": [
+        215,
+        143
+      ],
+      "lapvar_onscreen": 1483.7,
+      "note": "隔离编码环节"
+    },
+    {
+      "stage": "④ 去掉 512 上限（原图直落显示盒）",
+      "native_size": [
+        7008,
+        4672
+      ],
+      "onscreen_size": [
+        215,
+        143
+      ],
+      "lapvar_onscreen": 1355.9,
+      "note": "隔离「生成上限」环节"
+    }
+  ]
+}

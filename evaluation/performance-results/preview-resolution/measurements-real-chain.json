@@ -1,0 +1,155 @@
+{
+  "note": "供给图来自真实 ensure_display_asset；理想 = 原图 LANCZOS 落到显示框",
+  "box_css": 213,
+  "browser_filter": "BICUBIC（模拟 WebKit 下采样，旧链路只作量级对照）",
+  "chain": [
+    {
+      "dpr": 1,
+      "chain": "旧链路 供512",
+      "box_px": 213,
+      "served_px": 512,
+      "supply_bytes": 32110,
+      "downscale_ratio": 2.404,
+      "lapvar": 1499.8,
+      "mse_vs_ideal": 4.43,
+      "edge_overshoot": 0.82
+    },
+    {
+      "dpr": 1,
+      "chain": "新链路 供box",
+      "box_px": 213,
+      "served_px": 213,
+      "supply_bytes": 16710,
+      "downscale_ratio": 1.0,
+      "lapvar": 1543.4,
+      "mse_vs_ideal": 7.49,
+      "edge_overshoot": 1.15
+    },
+    {
+      "dpr": 1,
+      "chain": "理想 原图LANCZOS",
+      "box_px": 213,
+      "served_px": 213,
+      "supply_bytes": 0,
+      "downscale_ratio": 1.0,
+      "lapvar": 1519.5,
+      "mse_vs_ideal": 0.0,
+      "edge_overshoot": 0.81
+    },
+    {
+      "dpr": 2,
+      "chain": "旧链路 供512",
+      "box_px": 426,
+      "served_px": 512,
+      "supply_bytes": 32110,
+      "downscale_ratio": 1.202,
+      "lapvar": 618.9,
+      "mse_vs_ideal": 8.87,
+      "edge_overshoot": 1.79
+    },
+    {
+      "dpr": 2,
+      "chain": "新链路 供box",
+      "box_px": 426,
+      "served_px": 426,
+      "supply_bytes": 48288,
+      "downscale_ratio": 1.0,
+      "lapvar": 640.5,
+      "mse_vs_ideal": 10.2,
+      "edge_overshoot": 1.86
+    },
+    {
+      "dpr": 2,
+      "chain": "理想 原图LANCZOS",
+      "box_px": 426,
+      "served_px": 426,
+      "supply_bytes": 0,
+      "downscale_ratio": 1.0,
+      "lapvar": 692.2,
+      "mse_vs_ideal": 0.0,
+      "edge_overshoot": 2.12
+    }
+  ],
+  "encoder": [
+    {
+      "dpr": 1,
+      "box_px": 213,
+      "encoder": "q90-4:2:0",
+      "bytes": 10065,
+      "byte_delta_vs_baseline": 0.0,
+      "lapvar": 1594.1,
+      "mse_vs_ideal": 19.08,
+      "edge_overshoot": 1.06
+    },
+    {
+      "dpr": 1,
+      "box_px": 213,
+      "encoder": "q90-4:4:4",
+      "bytes": 12254,
+      "byte_delta_vs_baseline": 21.7,
+      "lapvar": 1594.1,
+      "mse_vs_ideal": 12.54,
+      "edge_overshoot": 1.06
+    },
+    {
+      "dpr": 1,
+      "box_px": 213,
+      "encoder": "q92-4:4:4",
+      "bytes": 13441,
+      "byte_delta_vs_baseline": 33.5,
+      "lapvar": 1589.0,
+      "mse_vs_ideal": 10.4,
+      "edge_overshoot": 1.16
+    },
+    {
+      "dpr": 1,
+      "box_px": 213,
+      "encoder": "q95-4:4:4",
+      "bytes": 16710,
+      "byte_delta_vs_baseline": 66.0,
+      "lapvar": 1543.4,
+      "mse_vs_ideal": 7.49,
+      "edge_overshoot": 1.15
+    },
+    {
+      "dpr": 2,
+      "box_px": 426,
+      "encoder": "q90-4:2:0",
+      "bytes": 28865,
+      "byte_delta_vs_baseline": 0.0,
+      "lapvar": 660.4,
+      "mse_vs_ideal": 13.7,
+      "edge_overshoot": 1.78
+    },
+    {
+      "dpr": 2,
+      "box_px": 426,
+      "encoder": "q90-4:4:4",
+      "bytes": 34911,
+      "byte_delta_vs_baseline": 20.9,
+      "lapvar": 660.4,
+      "mse_vs_ideal": 12.05,
+      "edge_overshoot": 1.78
+    },
+    {
+      "dpr": 2,
+      "box_px": 426,
+      "encoder": "q92-4:4:4",
+      "bytes": 38167,
+      "byte_delta_vs_baseline": 32.2,
+      "lapvar": 649.8,
+      "mse_vs_ideal": 11.21,
+      "edge_overshoot": 1.82
+    },
+    {
+      "dpr": 2,
+      "box_px": 426,
+      "encoder": "q95-4:4:4",
+      "bytes": 48288,
+      "byte_delta_vs_baseline": 67.3,
+      "lapvar": 640.5,
+      "mse_vs_ideal": 10.2,
+      "edge_overshoot": 1.86
+    }
+  ]
+}

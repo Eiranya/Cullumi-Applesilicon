@@ -68,6 +68,27 @@ const state = {
   },
   viewerMotion: { active: false, scrubbing: false },
   viewerClickTimer: null,
+  // Which display rendition is currently mounted on #viewerImage, as an index
+  // into viewer.js's VIEWER_TIER_WIDTHS (length == the original file). Kept in
+  // the shared view state because it is what the scale hint reports on: the
+  // hint must be able to say "still waiting for a sharper source" honestly.
+  viewerTier: 0,
+  // Tier index currently being fetched, or null when idle. Non-null also drives
+  // the "细节加载中" state, so it must be set before the request goes out and
+  // cleared on every exit path (success, stale, failure).
+  viewerTierPending: null,
+  // Set only by the explicit "view original" button, so that the swap jumps to
+  // 1:1 on arrival. Automatic swaps must NOT reset the user's zoom -- that would
+  // interrupt the very inspection the sharper source was fetched for.
+  viewerTierAutoOneToOne: false,
+  // Debounce handle for the tier check. Zoom is a high-frequency event; without
+  // this a single scroll gesture would fire dozens of decode-and-re-encode
+  // requests against a NAS.
+  viewerTierTimer: null,
+  // Debounce for the viewer diagnostic posts. Same rationale as the tier timer:
+  // a drag fires applyViewerTransform continuously and each report would be a
+  // round trip for numbers that only mean something once the gesture settles.
+  viewerDiagTimer: null,
   // Photo ids whose original file failed to load. Kept per id rather than as a
   // single flag so moving to another photo and back does not re-attempt a
   // download that already failed, while the next photo still gets a fresh try.

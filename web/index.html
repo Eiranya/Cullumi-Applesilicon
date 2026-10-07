@@ -149,7 +149,7 @@
       <figcaption><div class="viewer-title-line"><span id="viewerBadge" class="viewer-badge hidden"></span><span id="viewerAnalysisBadge" class="viewer-badge hidden"></span><span id="viewerVariantBadge" class="viewer-variant-badge hidden"></span><b id="viewerName"></b></div><span id="viewerMeta"></span><span id="viewerScaleHint" class="viewer-scale-hint"></span><span id="viewerOriginalHint" class="viewer-original-hint"></span></figcaption>
     </figure>
     <button class="side next" id="viewerNext" aria-label="下一张"><svg viewBox="0 0 1024 1024" aria-hidden="true"><use href="#viewer-next"></use></svg></button>
-    <footer><button id="viewerKeep" class="viewer-decision viewer-keep">W / ↑ 保留</button><span id="viewerIndex"></span><button id="viewerRemove" class="viewer-decision viewer-remove">S / ↓ 移除</button><button id="viewerOriginal" class="viewer-zoom" type="button" aria-label="载入原始文件" title="载入原图（F）">查看原图</button><button id="viewerOneToOne" class="viewer-zoom" type="button" aria-label="切换 1:1 原始像素" title="1:1 原始像素（1）">1:1</button><button id="viewerFit" class="viewer-zoom" type="button" aria-label="适应窗口" title="适应窗口（0）">适应</button></footer>
+    <footer><div class="viewer-decision-group"><button id="viewerKeep" class="viewer-decision viewer-keep">W / ↑ 保留</button><span id="viewerIndex"></span><button id="viewerRemove" class="viewer-decision viewer-remove">S / ↓ 移除</button></div><div class="viewer-zoom-group" role="group" aria-label="查看方式"><button id="viewerFit" class="viewer-zoom" type="button" aria-label="适应窗口" title="适应窗口（0）">适应</button><button id="viewerOriginal" class="viewer-zoom" type="button" aria-label="载入原始文件" title="载入原图（F）">查看原图</button></div></footer>
   </dialog>
 
   <dialog id="settings" class="panel-dialog">
@@ -203,6 +203,23 @@
               <div class="settings-row settings-choice">
                 <div class="setting-copy"><label for="motionCoverWriteback">Live图处理方式</label><small>修改原图前会在项目缓存中备份；视频帧的分辨率可能低于原始静态照片。</small></div>
                 <span class="select-field settings-select"><select id="motionCoverWriteback"><option value="never">不修改原图</option><option value="ask">每次修改前提醒</option><option value="always">始终修改原图</option></select><svg class="select-chevron" viewBox="0 0 1024 1024" aria-hidden="true"><use href="#chevron-down"></use></svg></span>
+              </div>
+            </div>
+          </div>
+          <div class="settings-section">
+            <h3>图片查看</h3>
+            <div class="settings-group">
+              <div class="settings-row settings-range">
+                <div class="setting-copy"><label for="viewerWheelTrackpad">触控板灵敏度</label><small>看大图时双指缩放（滚轮）的快慢。数值越大，同样的滚动幅度缩放越多。</small></div>
+                <div class="setting-range"><input id="viewerWheelTrackpad" type="range" min="0.5" max="2" step="0.1" value="1" aria-label="触控板缩放灵敏度"><output id="viewerWheelTrackpadValue" for="viewerWheelTrackpad">1.0×</output></div>
+              </div>
+              <div class="settings-row settings-range">
+                <div class="setting-copy"><label for="viewerWheelMouse">鼠标滚轮灵敏度</label><small>看大图时滚轮缩放的快慢。默认已比旧版更慢，不再「滚一格过头」。</small></div>
+                <div class="setting-range"><input id="viewerWheelMouse" type="range" min="0.5" max="2" step="0.1" value="1" aria-label="鼠标滚轮缩放灵敏度"><output id="viewerWheelMouseValue" for="viewerWheelMouse">1.0×</output></div>
+              </div>
+              <div class="settings-row settings-choice">
+                <div class="setting-copy"><label for="viewerWheelDevice">输入设备</label><small>自动识别靠滚动特征推断，可能判错；此处可强制指定当前使用的设备。</small></div>
+                <span class="select-field settings-select"><select id="viewerWheelDevice"><option value="auto">自动识别</option><option value="trackpad">触控板</option><option value="mouse">鼠标</option></select><svg class="select-chevron" viewBox="0 0 1024 1024" aria-hidden="true"><use href="#chevron-down"></use></svg></span>
               </div>
             </div>
           </div>

@@ -1,0 +1,114 @@
+{
+  "box": [
+    215,
+    143
+  ],
+  "webkit_vs_pil": {
+    "tight-ir-webkit-optimize-contrast@dpr1": {
+      "render_size": [
+        215,
+        143
+      ],
+      "all": {
+        "PIL_LANCZOS": 40.5,
+        "PIL_BICUBIC": 40.41,
+        "PIL_BILINEAR": 51.04,
+        "PIL_BOX": 50.7,
+        "PIL_HAMMING": 36.96,
+        "PIL_NEAREST": 3.33,
+        "原图直落LANCZOS上限": 44.67
+      },
+      "closest": "PIL_NEAREST",
+      "closest_mse": 3.33
+    },
+    "tight-ir-webkit-optimize-contrast@dpr2": {
+      "render_size": [
+        430,
+        286
+      ],
+      "all": {
+        "PIL_LANCZOS": 26.4,
+        "PIL_BICUBIC": 24.11,
+        "PIL_BILINEAR": 28.48,
+        "PIL_BOX": 14.19,
+        "PIL_HAMMING": 17.06,
+        "PIL_NEAREST": 3.64,
+        "原图直落LANCZOS上限": 34.2
+      },
+      "closest": "PIL_NEAREST",
+      "closest_mse": 3.64
+    },
+    "tight-irdefault@dpr1": {
+      "render_size": [
+        215,
+        143
+      ],
+      "all": {
+        "PIL_LANCZOS": 20.67,
+        "PIL_BICUBIC": 18.02,
+        "PIL_BILINEAR": 20.57,
+        "PIL_BOX": 25.3,
+        "PIL_HAMMING": 19.09,
+        "PIL_NEAREST": 65.3,
+        "原图直落LANCZOS上限": 24.92
+      },
+      "closest": "PIL_BICUBIC",
+      "closest_mse": 18.02
+    },
+    "tight-irdefault@dpr2": {
+      "render_size": [
+        430,
+        286
+      ],
+      "all": {
+        "PIL_LANCZOS": 3.82,
+        "PIL_BICUBIC": 2.42,
+        "PIL_BILINEAR": 3.74,
+        "PIL_BOX": 14.14,
+        "PIL_HAMMING": 3.57,
+        "PIL_NEAREST": 22.13,
+        "原图直落LANCZOS上限": 11.93
+      },
+      "closest": "PIL_BICUBIC",
+      "closest_mse": 2.42
+    }
+  },
+  "edge_mask": {
+    "tight-ir-webkit-optimize-contrast@dpr1": {
+      "PIL_LANCZOS": 119.02,
+      "PIL_BICUBIC": 120.67,
+      "PIL_BILINEAR": 162.97,
+      "PIL_BOX": 147.66,
+      "PIL_HAMMING": 111.77,
+      "PIL_NEAREST": 9.49,
+      "原图直落LANCZOS上限": 129.64
+    },
+    "tight-ir-webkit-optimize-contrast@dpr2": {
+      "PIL_LANCZOS": 85.82,
+      "PIL_BICUBIC": 77.63,
+      "PIL_BILINEAR": 91.89,
+      "PIL_BOX": 45.34,
+      "PIL_HAMMING": 54.42,
+      "PIL_NEAREST": 11.47,
+      "原图直落LANCZOS上限": 107.75
+    },
+    "tight-irdefault@dpr1": {
+      "PIL_LANCZOS": 58.97,
+      "PIL_BICUBIC": 48.6,
+      "PIL_BILINEAR": 57.09,
+      "PIL_BOX": 71.71,
+      "PIL_HAMMING": 51.6,
+      "PIL_NEAREST": 192.49,
+      "原图直落LANCZOS上限": 70.67
+    },
+    "tight-irdefault@dpr2": {
+      "PIL_LANCZOS": 12.8,
+      "PIL_BICUBIC": 7.42,
+      "PIL_BILINEAR": 11.94,
+      "PIL_BOX": 45.71,
+      "PIL_HAMMING": 11.28,
+      "PIL_NEAREST": 71.49,
+      "原图直落LANCZOS上限": 36.15
+    }
+  }
+}

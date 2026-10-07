@@ -1,0 +1,53 @@
+{
+  "card_box": [
+    215,
+    161
+  ],
+  "xy": [
+    764,
+    177
+  ],
+  "screen_roi_size": [
+    209,
+    144
+  ],
+  "lapvar_screen": 1876.4,
+  "paths": {
+    "磁盘缩略图512 → LANCZOS": {
+      "native": [
+        209,
+        144
+      ],
+      "lapvar_at_display": 2294.6
+    },
+    "磁盘缩略图512 → BICUBIC": {
+      "native": [
+        209,
+        144
+      ],
+      "lapvar_at_display": 1851.9
+    },
+    "磁盘缩略图512 → BILINEAR": {
+      "native": [
+        209,
+        144
+      ],
+      "lapvar_at_display": 1179.3
+    },
+    "磁盘缩略图512 → BOX": {
+      "native": [
+        209,
+        144
+      ],
+      "lapvar_at_display": 2190.9
+    },
+    "原图7008 → 显示尺寸 LANCZOS（上限）": {
+      "native": [
+        209,
+        144
+      ],
+      "lapvar_at_display": 2355.0
+    }
+  },
+  "gap_vs_ideal": 25.5
+}

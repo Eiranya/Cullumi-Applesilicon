@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import copy
 import csv
+import json
+import shutil
+import subprocess
 import tempfile
 import unittest
 from contextlib import closing
@@ -9,7 +12,9 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from cullumi import http_api, project_store
+from PIL import Image
+
+from cullumi import http_api, media, project_store
 from cullumi.capture_variants import (
     active_variant_rows,
     format_category_counts,
@@ -2323,6 +2328,1166 @@ class CaptureVariantMigrationTests(unittest.TestCase):
             self.assertEqual(decisions, {jpg: "keep", raw: "remove"})
             self.assertEqual(similar_count, 0)
             self.assertEqual(len(list(path.parent.glob("project.pre-v5-*.db"))), 1)
+
+
+class ViewerTierSwapTests(unittest.TestCase):
+    """The viewer fetches pixels to match the display size instead of upscaling.
+
+    The complaint under test: zooming a photo stayed soft even after "view
+    original" reported 1:1. The cause was that magnification went through CSS
+    ``transform: scale()``, which resamples an already-decoded bitmap -- so a
+    7008px photo shown through a 2048px preview was interpolated no matter how
+    far the user zoomed. The fix fetches a rendition as wide as the display
+    actually needs, so the browser only ever downsamples.
+
+    These tests drive the real ``viewer.js`` source through Node with a stub DOM
+    rather than asserting on its text. A text assertion ("the word hysteresis
+    appears") passes just as happily when the logic is wrong; executing the
+    function is the only way to show the tier actually moves.
+    """
+
+    SCRIPT = """
+    // Extract the tier machinery from viewer.js and run it against a stub DOM.
+    const fs = require("fs");
+    // With `node -e` the extra operand lands in argv[1], not argv[2].
+    const path = process.argv[1];
+    const source = fs.readFileSync(path, "utf8");
+
+    // Minimal DOM good enough for the tier code paths.
+    const listeners = new Map();
+    function makeEl(id) {
+      return {
+        id,
+        naturalWidth: 0,
+        naturalHeight: 0,
+        offsetWidth: 0,
+        offsetHeight: 0,
+        complete: true,
+        style: {},
+        dataset: {},
+        classList: {
+          _s: new Set(),
+          add(c) { this._s.add(c); },
+          remove(c) { this._s.delete(c); },
+          contains(c) { return this._s.has(c); },
+          toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); },
+        },
+        _attrs: {},
+        // viewer.js assigns `img.src = url` but reads it back with
+        // getAttribute("src"). A real element keeps those in sync, so the stub
+        // must too -- otherwise a swap looks like it never happened.
+        get src() { return this._attrs.src ?? ""; },
+        set src(v) { this._attrs.src = v; },
+        getAttribute(k) { return this._attrs[k] ?? null; },
+        setAttribute(k, v) { this._attrs[k] = v; },
+        addEventListener(ev, fn) {
+          (listeners.get(this.id + ":" + ev) ?? listeners.set(this.id + ":" + ev, []).get(this.id + ":" + ev)).push(fn);
+        },
+        removeEventListener() {},
+        getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
+        parentElement: null,
+        focus() {},
+      };
+    }
+    const els = new Map();
+    function $(sel) {
+      const id = sel.replace(/^#/, "");
+      if (!els.has(id)) {
+        const el = makeEl(id);
+        el.parentElement = makeEl(id + "-parent");
+        // The viewer sizes the image by writing width/height, so it derives the
+        // "fit" size from the media box rather than from offsetWidth (which now
+        // includes the zoom). Give the stub a real box or every fit computation
+        // collapses to NaN and the whole harness goes dark.
+        el.parentElement.clientWidth = 1521;
+        el.parentElement.clientHeight = 1013;
+        els.set(id, el);
+      }
+      return els.get(id);
+    }
+    const $$ = () => [];
+    const toasts = [];
+    const toast = (m) => toasts.push(m);
+
+    global.$ = $;
+    global.$$ = $$;
+    global.toast = toast;
+    global.toasts = toasts;
+    global.window = { devicePixelRatio: 1 };
+    global.document = { querySelector: $ };
+    global.state = {
+      viewerIndex: 0,
+      items: [],
+      viewerMotion: { active: false },
+      viewerTransform: { scale: 1, x: 0, y: 0, dragging: false },
+      viewerTier: 0,
+      viewerTierPending: null,
+      viewerTierAutoOneToOne: false,
+      viewerTierTimer: null,
+      viewerOriginalFailed: new Set(),
+      viewerClickTimer: null,
+    };
+    // A controllable Image: tests decide when (and whether) it loads.
+    global.__probes = [];
+    global.Image = class {
+      constructor() {
+        this.onload = null;
+        this.onerror = null;
+        this._src = "";
+        global.__probes.push(this);
+      }
+      set src(v) { this._src = v; }
+      get src() { return this._src; }
+      addEventListener() {}
+      removeEventListener() {}
+    };
+
+    // Load viewer.js. It has no module system; everything is a top-level
+    // declaration, so appending an export works inside the same scope.
+    const src = source + `
+;module.exports = {
+  viewerPickTier, viewerNeededPixels, viewerBitmapPixels, viewerTierUrl,
+  viewerTierWidth, viewerTierLabel, syncViewerTier, loadViewerTier,
+  renderViewerScaleHint, viewerIsSourcingDetail, viewerAtPixelCeiling,
+  viewerNeedsBetterSource, viewerIsOneToOne, applyViewerTransform,
+  resetViewerTransform, loadViewerOriginal,
+  viewerShowingOriginal, viewerBitmapBelowSource, viewerOneToOneScale,
+  syncViewerOriginalState, renderViewerZoomState,
+  viewerWheelPixels, viewerWheelDeviceKind,
+  viewerWheelDevice, viewerWheelSensitivity, viewerWheelZoomFactor,
+  resetViewerWheelSession, zoomViewer,
+  VIEWER_TIER_WIDTHS, VIEWER_TIER_HYSTERESIS, VIEWER_TIER_FAILED,
+  VIEWER_WHEEL_BASE, VIEWER_WHEEL_REFERENCE_NOTCH_PX, VIEWER_WHEEL_ZOOM_PER_NOTCH,
+  VIEWER_WHEEL_LINE_PX, VIEWER_WHEEL_PAGE_PX, VIEWER_WHEEL_SESSION_GAP_MS,
+  VIEWER_WHEEL_MOUSE_DELTA_PX, VIEWER_WHEEL_TRACKPAD_DELTA_PX,
+  VIEWER_WHEEL_SENSITIVITY_MIN, VIEWER_WHEEL_SENSITIVITY_MAX,
+  _state: state, _probeCount: () => global.__probes.length,
+  _probeSrc: (i) => global.__probes[i].src,
+  _fireLoad: (i) => global.__probes[i].onload && global.__probes[i].onload(),
+  _fireError: (i) => global.__probes[i].onerror && global.__probes[i].onerror(),
+  _resetProbes: () => { global.__probes.length = 0; },
+};
+`;
+    const module_ = { exports: {} };
+    new Function("module", "exports", "require", src)(
+      module_, module_.exports, require,
+    );
+    global.__viewer = module_.exports;
+    // Drive a listener the viewer registered through addEventListener: the stub
+    // records them in `listeners` keyed by "<id>:<event>", but nothing ever
+    // dispatches them. Needed to exercise the post-load path that auto-lands on
+    // 1:1 once the original bitmap decodes (the `1` shortcut has been withdrawn,
+    // so that callback is the only remaining way to reach 1:1).
+    global.__viewer._fireElement = (id, ev) => {
+      (listeners.get(id + ":" + ev) || []).forEach((fn) => fn());
+    };
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.node = shutil.which("node")
+        if not cls.node:
+            raise unittest.SkipTest("需要 node 才能执行 viewer.js 的换源逻辑")
+        cls.web = Path(__file__).parents[1] / "web" / "js" / "viewer.js"
+        cls.harness = Path(tempfile.mkdtemp()) / "harness.js"
+        cls.harness.write_text(cls.SCRIPT, encoding="utf-8")
+
+    def run_viewer(self, body: str) -> dict[str, Any]:
+        """Execute ``body`` with ``__viewer`` in scope; return its JSON result."""
+        script = f"require({str(self.harness)!r});\n{body}\n"
+        completed = subprocess.run(
+            [self.node, "-e", script, str(self.web)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if completed.returncode != 0:
+            self.fail(f"harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_the_tier_ladder_moves_up_as_the_demand_grows(self) -> None:
+        """Reverse proof that the picker is real, not a constant.
+
+        Each step demands more device pixels than the tier below can supply and
+        asserts the ladder answered with a higher tier. A picker that ignored
+        ``needed`` would return the same index every time and fail step 2.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const seq = [];
+            // Stage width 1521 CSS px (a 3440px-wide window minus the viewer
+            // chrome), DPR 1 -- the measured display, not a round number.
+            const stage = 1521;
+            const at = (needed) => v.viewerPickTier(needed, 0);
+            seq.push(at(stage * 1.0));   // 1521  -> 2048 够用（1024 不够）
+            seq.push(at(stage * 2.0));   // 3042  -> needs 4096
+            seq.push(at(stage * 3.0));   // 4563  -> needs the original
+            seq.push(at(stage * 8.0));   // 12168 -> original is all there is
+            console.log(JSON.stringify({seq, widths: v.VIEWER_TIER_WIDTHS}));
+            """
+        )
+        # 最小档是 1024，不是 2048：浏览器把大位图缩到很小的时候走快速降采样路径
+        # （实测只有 Lanczos 的一半高频），所以首屏要有一档接近显示尺寸的供给。
+        self.assertEqual(result["widths"], [1024, 2048, 4096])
+        # Non-decreasing, and it must actually reach the top tier (index 3).
+        self.assertEqual(result["seq"], sorted(result["seq"]))
+        self.assertEqual(result["seq"][0], 1, "需求 1521 应停在 2048 档（1024 不足）")
+        self.assertEqual(result["seq"][1], 2, "需求超过 2048 应升到 4096 档")
+        self.assertEqual(result["seq"][2], 3, "需求超过 4096 应升到原图档")
+        self.assertEqual(result["seq"][3], 3, "超过原图宽度仍只能是原图档")
+
+    def test_hysteresis_stops_boundary_flapping(self) -> None:
+        """The failure mode this exists for: oscillating across a threshold.
+
+        Sitting exactly on the 2048 boundary and nudging the zoom by a single
+        wheel notch (x1.18) must not walk the tier up and down. Without the
+        dead band, every notch would re-request and thrash the cache.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            // Straddle the 2048 boundary from both sides, one notch at a time.
+            const start = 2040;
+            const notches = [1.18, 1 / 1.18, 1.18, 1 / 1.18, 1.18, 1 / 1.18];
+            let needed = start, current = 0, switches = 0;
+            const trail = [];
+            for (const n of notches) {
+              needed *= n;
+              const next = v.viewerPickTier(needed, current);
+              if (next !== current) switches += 1;
+              current = next;
+              trail.push([Math.round(needed), current]);
+            }
+            // And the reverse direction from a firmly-high tier.
+            let needed2 = 4090, cur2 = 2, back = 0;
+            for (const n of notches) {
+              needed2 *= n;
+              const next = v.viewerPickTier(needed2, cur2);
+              if (next !== cur2) back += 1;
+              cur2 = next;
+            }
+            console.log(JSON.stringify({
+              hysteresis: v.VIEWER_TIER_HYSTERESIS,
+              notch: 1.18, switches, back, trail,
+            }));
+            """
+        )
+        # The dead band must be wider than one wheel notch, or the design is
+        # wrong. The band spans needed/hysteresis .. needed, i.e. a factor of
+        # 1/0.75 = 1.33; a notch only moves the demand by 1.18. If the notch were
+        # the wider of the two, a single scroll could cross the whole band.
+        self.assertLess(result["notch"], 1 / result["hysteresis"])
+        self.assertLessEqual(
+            result["switches"], 2, f"边界抖动：{result['trail']}"
+        )
+        self.assertLessEqual(result["back"], 2, "缩小时同样不应抖动")
+
+    def test_a_downgrade_needs_the_dead_band_not_merely_a_smaller_demand(self) -> None:
+        """A smaller demand is not on its own a reason to drop a tier.
+
+        Between "fits 2048 comfortably" and "comfortably below the next step
+        down" the viewer must stay put. Dropping early would re-request the
+        smaller tier and then immediately need the bigger one again -- the exact
+        ping-pong the band exists to prevent.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const keep = v.viewerPickTier(1900, 1);   // fits 2048; 1024's band is 768
+            const drop = v.viewerPickTier(700, 1);    // inside 1024's dead band
+            console.log(JSON.stringify({keep, drop}));
+            """
+        )
+        self.assertEqual(result["keep"], 1, "未进死区就不该降档")
+        self.assertEqual(result["drop"], 0, "进入死区才降档")
+
+    def test_zooming_back_out_drops_straight_to_the_small_tier(self) -> None:
+        """Cross-tier downgrade, which the first implementation could not do.
+
+        The original rule was "one step down, and only from the tier directly
+        above" (``tier + 1 === current``). From the original tier back to the
+        fit view that is two or three steps, so the condition was never true and
+        the viewer stayed on the source file -- forcing the browser to shrink a
+        7008px bitmap down to a few hundred pixels for *every* fit view, which
+        is precisely when it is fastest and least accurate (measured: half the
+        high-frequency energy of a proper Lanczos downscale).
+
+        So the dead band still governs neighbouring tiers, but a larger gap is
+        crossed in one go. One extra request beats staying permanently soft.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            console.log(JSON.stringify({
+              fromOriginal: v.viewerPickTier(900, 3),   // 原图档 -> 1024
+              fromHigh: v.viewerPickTier(900, 2),       // 4096 -> 1024
+              stillBanded: v.viewerPickTier(1900, 1),   // 相邻档仍受死区约束
+            }));
+            """
+        )
+        self.assertEqual(result["fromOriginal"], 0, "原图档缩回首屏应一次跨到 1024")
+        self.assertEqual(result["fromHigh"], 0, "4096 档缩回首屏同样应跨档")
+        self.assertEqual(result["stillBanded"], 1, "相邻档不能因为跨档放开了就失去死区")
+
+    def test_the_source_url_actually_carries_the_requested_width(self) -> None:
+        """The tier index must reach the wire as ``&w=``.
+
+        This is the assertion that the whole mechanism is not decorative: if the
+        URL ignored the tier, every zoom would refetch the same 2048px JPEG and
+        the page would stay soft exactly as reported.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const p = { photo_url: "/api/photo?project_id=p&id=7&token=t&v=0" };
+            console.log(JSON.stringify({
+              first: v.viewerTierUrl(p, 0),
+              mid: v.viewerTierUrl(p, 1),
+              high: v.viewerTierUrl(p, 2),
+              original: v.viewerTierUrl(p, 3),
+              labels: [0, 1, 2, 3].map(v.viewerTierLabel),
+            }));
+            """
+        )
+        self.assertIn("w=1024", result["first"])
+        self.assertIn("w=2048", result["mid"])
+        self.assertIn("w=4096", result["high"])
+        # The top tier must NOT carry a width: that is what makes the server
+        # send the untouched source file rather than another re-encode.
+        self.assertNotIn("w=", result["original"])
+        self.assertEqual(result["original"], "/api/photo?project_id=p&id=7&token=t&v=0")
+        self.assertEqual(result["labels"], ["1024px", "2048px", "4096px", "原图"])
+
+    def test_swapping_the_source_keeps_the_current_frame_on_screen(self) -> None:
+        """A swap must not blank the viewer while the new tier is in flight.
+
+        Regression guard for the obvious implementation: assigning ``img.src``
+        directly. That clears the frame immediately, so a NAS hiccup leaves a
+        broken image instead of the photo the user was looking at.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            st.items = [{ id: 7, width: 7008, height: 4672, photo_url: "/p",
+                          preview_url: "/p&w=2048" }];
+            const img = document.querySelector("#viewerImage");
+            img._attrs.src = "/p&w=2048";
+            img.offsetWidth = 1521; img.offsetHeight = 1013; img.naturalWidth = 2048; img.naturalHeight = 1365;
+            st.viewerTransform.scale = 2;
+            v.syncViewerTier();
+            const duringPending = {
+              src: img.getAttribute("src"),
+              pending: st.viewerTierPending,
+              hidden: document.querySelector("#viewerLoading").classList.contains("hidden"),
+            };
+            v._fireLoad(0);                       // the probe resolves
+            const afterSwap = { src: img.getAttribute("src"), tier: st.viewerTier };
+            console.log(JSON.stringify({duringPending, afterSwap}));
+            """
+        )
+        # Still showing the old tier, with the indicator up.
+        self.assertEqual(result["duringPending"]["src"], "/p&w=2048")
+        self.assertEqual(result["duringPending"]["pending"], 2)
+        self.assertFalse(result["duringPending"]["hidden"], "换源时应有可见反馈")
+        # Only once the new bitmap has actually loaded does src change.
+        self.assertEqual(result["afterSwap"]["src"], "/p&w=4096")
+        self.assertEqual(result["afterSwap"]["tier"], 2)
+
+    def test_a_stale_response_for_a_previous_photo_is_discarded(self) -> None:
+        """Flipping through photos must not install the wrong image.
+
+        The user pages on while a 4096 request is still open. When it lands, the
+        naive code assigns ``img.src`` unconditionally and the *previous* photo's
+        pixels end up under the *current* photo's name.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            st.items = [{ id: 7, width: 7008, height: 4672, photo_url: "/p",
+                          preview_url: "/p&w=2048" }];
+            const img = document.querySelector("#viewerImage");
+            img._attrs.src = "/p&w=2048";
+            img.offsetWidth = 1521; img.naturalWidth = 2048; img.naturalHeight = 1365;
+            st.viewerTransform.scale = 2;
+            v.syncViewerTier();
+            // The user pages on before the probe resolves.
+            st.items = [{ id: 8, width: 7008, height: 4672, photo_url: "/q",
+                          preview_url: "/q&w=2048" }];
+            v._fireLoad(0);
+            console.log(JSON.stringify({
+              src: img.getAttribute("src"),
+              pending: st.viewerTierPending,
+              hidden: document.querySelector("#viewerLoading").classList.contains("hidden"),
+            }));
+            """
+        )
+        self.assertEqual(result["src"], "/p&w=2048", "过期响应被装到了当前照片上")
+        self.assertIsNone(result["pending"], "过期响应必须清掉在途标记")
+        self.assertTrue(result["hidden"], "过期后指示器应收起")
+
+    def test_a_failed_swap_degrades_and_never_leaves_a_blank_frame(self) -> None:
+        """An unreachable NAS must cost sharpness, not the picture."""
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            st.items = [{ id: 7, width: 7008, height: 4672, photo_url: "/p",
+                          preview_url: "/p&w=2048" }];
+            const img = document.querySelector("#viewerImage");
+            img._attrs.src = "/p&w=2048";
+            img.offsetWidth = 1521; img.naturalWidth = 2048; img.naturalHeight = 1365;
+            st.viewerTransform.scale = 2;
+            v.syncViewerTier();
+            v._fireError(0);
+            const afterFail = {
+              src: img.getAttribute("src"),
+              pending: st.viewerTierPending,
+              tier: st.viewerTier,
+              indicator: document.querySelector("#viewerLoading").classList.contains("hidden"),
+            };
+            // Retrying the same broken tier must be suppressed.
+            v._resetProbes();
+            st.viewerTransform.scale = 2;
+            v.syncViewerTier();
+            const probesOnRetry = v._probeCount();
+            console.log(JSON.stringify({afterFail, probesOnRetry,
+                                         toasts: global.toasts.length}));
+            """
+        )
+        self.assertEqual(result["afterFail"]["src"], "/p&w=2048", "失败后画面被清空了")
+        self.assertIsNone(result["afterFail"]["pending"])
+        self.assertTrue(result["afterFail"]["indicator"])
+        # The failed tier is remembered, so the retry does not re-request it.
+        self.assertEqual(result["probesOnRetry"], 0, "失败的档位被反复重试")
+        self.assertGreaterEqual(result["toasts"], 1, "降级应当告知用户")
+
+    def test_the_same_tier_is_never_requested_twice(self) -> None:
+        """Throttling is the first guard; this is the backstop.
+
+        Every ``applyViewerTransform`` schedules a check, and zoom fires that
+        hundreds of times. Even if the settle timer and the hysteresis both
+        misfire, an unchanged tier must not produce a second request.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            st.items = [{ id: 7, width: 7008, height: 4672, photo_url: "/p",
+                          preview_url: "/p&w=1024" }];
+            const img = document.querySelector("#viewerImage");
+            img._attrs.src = "/p&w=1024";
+            img.offsetWidth = 1024; img.naturalWidth = 1024; img.naturalHeight = 683;
+            v._resetProbes();
+            st.viewerTransform.scale = 1.0;    // needed = 1024 = 首屏档，无需换源
+            for (let i = 0; i < 50; i++) v.syncViewerTier();
+            console.log(JSON.stringify({probes: v._probeCount()}));
+            """
+        )
+        self.assertEqual(result["probes"], 0, "同一档位被重复请求")
+
+    def test_after_a_swap_the_bitmap_is_never_upscaled(self) -> None:
+        """The point of the whole change, asserted as an invariant.
+
+        At every zoom level the served rendition must supply at least as many
+        pixels as the display consumes -- otherwise the browser interpolates,
+        which is the exact defect being fixed.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            st.items = [{ id: 7, width: 7008, height: 4672, photo_url: "/p",
+                          preview_url: "/p&w=2048" }];
+            const img = document.querySelector("#viewerImage");
+            const stage = 1521;               // measured: 3440px window, DPR 1
+            img.offsetWidth = stage; img.offsetHeight = 1013;
+            let bitmap = 2048;
+            img.naturalWidth = bitmap; img.naturalHeight = Math.round(bitmap / 1.5);
+            let tier = 0;
+            const violations = [];
+            const ceiling = [];       // beyond the source's own pixels
+            const SOURCE = 7008;      // this photo's real width
+            for (let scale = 1; scale <= 8; scale *= 1.18) {
+              st.viewerTransform.scale = scale;
+              const needed = v.viewerNeededPixels();
+              const want = v.viewerPickTier(needed, tier);
+              if (want !== tier) { tier = want; bitmap = v.viewerTierWidth(tier); }
+              // The original tier supplies the photo's own pixels.
+              const supply = tier >= 2 ? SOURCE : bitmap;
+              if (supply < needed) {
+                // Past the file's own resolution nothing can supply enough --
+                // that is the physical ceiling, not a tier-selection failure.
+                (needed > SOURCE ? ceiling : violations).push(
+                  [+scale.toFixed(2), Math.round(needed), supply]);
+              }
+            }
+            console.log(JSON.stringify({violations, ceiling, stage,
+                                         dpr: window.devicePixelRatio}));
+            """
+        )
+        self.assertEqual(result["dpr"], 1)
+        # Within what the file can supply, no zoom level may upscale.
+        self.assertEqual(
+            result["violations"], [], "存在仍在插值的缩放档位"
+        )
+        # And the ceiling is genuinely reached (otherwise the check above is
+        # vacuous -- it would pass simply by never scaling far enough).
+        self.assertTrue(result["ceiling"], "测试没有覆盖到原图的物理上限")
+        self.assertTrue(
+            all(needed > 7008 for _, needed, _ in result["ceiling"]),
+            "上限之外的需求不应超过原图宽度",
+        )
+
+    def test_zooming_past_the_original_reports_an_honest_ceiling(self) -> None:
+        """Beyond the source resolution, interpolation is physics, not a bug.
+
+        The old wording ("已插值 N%，细节非原始像素") reads like a defect the app
+        could fix. Once the source-swap works, the only time interpolation remains
+        is when the user magnifies past the file's own pixels -- so the hint must
+        say so instead of implying something is broken.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            st.items = [{ id: 7, width: 7008, height: 4672, photo_url: "/p",
+                          preview_url: "/p&w=2048" }];
+            const img = document.querySelector("#viewerImage");
+            img.offsetWidth = 1521; img.offsetHeight = 1013;
+            img.naturalWidth = 7008; img.naturalHeight = 4672;              // the original is mounted
+            img._attrs.src = "/p";
+            st.viewerTier = 2;
+
+            const at = (scale) => {
+              st.viewerTransform.scale = scale;
+              v.renderViewerScaleHint();
+              return document.querySelector("#viewerScaleHint").textContent;
+            };
+            console.log(JSON.stringify({
+              fitting: at(1),
+              oneToOne: at(7008 / 1521),
+              wayPast: at((7008 / 1521) * 2),
+            }));
+            """
+        )
+        self.assertIn("整幅显示", result["fitting"])
+        self.assertIn("已 1:1", result["oneToOne"])
+        self.assertIn("已到原始像素上限", result["wayPast"])
+
+    def test_the_hint_admits_it_is_waiting_for_a_sharper_source(self) -> None:
+        """A swap in flight is a state the old three-state model had no name for.
+
+        Reporting "已 1:1" while the 2048px bitmap is still mounted is exactly the
+        lie that produced this bug report, so the pending state must be checked
+        before the 1:1 branch.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            st.items = [{ id: 7, width: 7008, height: 4672, photo_url: "/p",
+                          preview_url: "/p&w=2048" }];
+            const img = document.querySelector("#viewerImage");
+            img.offsetWidth = 1521; img.naturalWidth = 2048; img.naturalHeight = 1365;
+            img._attrs.src = "/p&w=2048";
+            st.viewerTransform.scale = 2;
+            st.viewerTierPending = 1;
+            v.renderViewerScaleHint();
+            const hint = document.querySelector("#viewerScaleHint").textContent;
+            console.log(JSON.stringify({hint}));
+            """
+        )
+        self.assertIn("细节加载中", result["hint"])
+        self.assertNotIn("已 1:1", result["hint"])
+
+    def test_the_original_is_not_declared_loaded_for_a_mid_tier_rendition(self) -> None:
+        """The button and loadViewerOriginal must not trust a prefix match.
+
+        The complaint under test: after "view original" the 1:1 button did not
+        show the original's 1:1. The cause was that the client builds mid-tier
+        URLs as ``photo_url + "&w=2048"``, and ``viewerShowingOriginal``
+        compared everything *before* ``&w=`` to ``photo_url`` -- so every
+        mid-tier swap looked like the source file. Consequences: (1) the
+        button claimed 原图 while a 2048px bitmap was mounted, (2)
+        ``loadViewerOriginal`` early-returned so the real file was never
+        fetched, (3) 1:1 then landed on the 2048px bitmap's 1:1 instead of the
+        7008px file's.
+
+        Reverse proof: pointing src at the exact ``photo_url`` must flip the
+        verdict back to true, so a function that always answered one way fails.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            const p = { id: 7, width: 7008, height: 4672,
+                        photo_url: "/api/photo?project_id=p&id=7&token=t&v=0",
+                        preview_url: "/api/photo?project_id=p&id=7&token=t&w=2048&v=0" };
+            st.items = [p];
+            st.viewerTier = 1;
+            const img = document.querySelector("#viewerImage");
+            img.offsetWidth = 1521; img.offsetHeight = 1013;
+            img.naturalWidth = 2048; img.naturalHeight = 1365;
+            // The client's own mid-tier URL (photo_url + &w=2048), which is
+            // what the viewer mounts the moment it swaps up on open.
+            const midTierUrl = v.viewerTierUrl(p, 1);
+            img._attrs.src = midTierUrl;
+            const midTierClaimsOriginal = v.viewerShowingOriginal();
+            // Now ask for the original: it must actually go fetch (probe).
+            v._resetProbes();
+            v.loadViewerOriginal();
+            const probed = v._probeCount();
+            const pending = st.viewerTierPending;
+            // The exact source URL must be recognised as the original.
+            img._attrs.src = p.photo_url;
+            const exactClaimsOriginal = v.viewerShowingOriginal();
+            console.log(JSON.stringify({midTierClaimsOriginal, probed, pending,
+              exactClaimsOriginal, midTierUrl}));
+            """
+        )
+        self.assertIn("&w=2048", result["midTierUrl"])
+        self.assertFalse(
+            result["midTierClaimsOriginal"], "中间档 URL 被误判成原图"
+        )
+        self.assertEqual(result["probed"], 1, "点了查看原图却没有下发原图")
+        self.assertEqual(result["pending"], 3, "在途目标应为原图档")
+        self.assertTrue(result["exactClaimsOriginal"], "挂牌原图后应被识别为原图")
+
+    def test_one_to_one_on_the_original_is_pixel_exact(self) -> None:
+        """At 1:1 the displayed width must equal the source pixel width.
+
+        This is the promise the whole feature makes: one source pixel lands on
+        one screen pixel. The layout width is capped at the 1:1 step and the
+        remainder rides in ``transform: scale``; the proof is that
+        ``width * residual`` still equals naturalWidth -- i.e. the residual is
+        a genuine no-op at the 1:1 point rather than a wrapper that quietly
+        re-scales.
+
+        Reverse proof: if the residual were dropped (transform left at
+        ``scale(1)``) the product would fall to naturalWidth / oneToOne, and if
+        the layout were left at the fit size it would be the fit width; both
+        fail the exact equality below.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            st.items = [{ id: 7, width: 7008, height: 4672, photo_url: "/p",
+                          preview_url: "/p&w=2048" }];
+            const img = document.querySelector("#viewerImage");
+            img.offsetWidth = 1521; img.offsetHeight = 1013;
+            img.naturalWidth = 7008; img.naturalHeight = 4672;
+            img._attrs.src = "/p";
+            const fitW = 7008 * Math.min(1521 / 7008, 1013 / 4672, 1);
+            const oneToOne = v.viewerOneToOneScale();
+            const at = (scale) => {
+              st.viewerTransform.scale = scale;
+              st.viewerTransform.x = 0; st.viewerTransform.y = 0;
+              v.applyViewerTransform();
+              const residual = Number(
+                (img.style.transform || "").split("scale(")[1].split(")")[0]);
+              const width = parseFloat(img.style.width);
+              return { scale, width, residual, shown: width * residual,
+                       natural: img.naturalWidth };
+            };
+            st.viewerTransform.scale = 1; v.applyViewerTransform();
+            const r1 = at(oneToOne);
+            const below = at(oneToOne * 0.5);
+            const above = at(oneToOne * 2);
+            console.log(JSON.stringify({oneToOne, fitW, r1, below, above}));
+            """
+        )
+        self.assertAlmostEqual(result["oneToOne"], 7008 / result["fitW"], places=6)
+        # At the 1:1 point the source pixel is the screen pixel, exactly.
+        self.assertEqual(result["r1"]["residual"], 1)
+        self.assertEqual(round(result["r1"]["width"]), 7008)
+        self.assertEqual(round(result["r1"]["shown"]), result["r1"]["natural"])
+        self.assertEqual(round(result["r1"]["shown"]), 7008)
+        # The layout is capped at the source width, and the residual really is
+        # applied: displayed size must track fit x scale on both sides of 1:1.
+        self.assertLessEqual(result["above"]["width"], 7008 + 1e-6)
+        self.assertAlmostEqual(
+            result["below"]["shown"], result["fitW"] * result["below"]["scale"], places=3
+        )
+        self.assertAlmostEqual(
+            result["above"]["shown"], result["fitW"] * result["above"]["scale"], places=3
+        )
+
+    def test_the_hint_will_not_call_a_preview_bitmap_one_to_one(self) -> None:
+        """A preview's 1:1 is not the original's 1:1 and must not be named so.
+
+        The honesty requirement: while only a downscaled rendition is mounted,
+        reaching its 1:1 satisfies "one bitmap pixel per screen pixel" but not
+        "one source pixel per screen pixel", so the hint must not claim
+        "已 1:1".
+
+        Reverse proof: the same assertions are repeated with the original
+        mounted, where "已 1:1" IS the honest wording -- so a hint that simply
+        never said it would fail the second half.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            st.items = [{ id: 7, width: 7008, height: 4672, photo_url: "/p",
+                          preview_url: "/p&w=2048" }];
+            const img = document.querySelector("#viewerImage");
+            img.offsetWidth = 1521; img.offsetHeight = 1013;
+            const at = (natW, natH, src, tier) => {
+              img.naturalWidth = natW; img.naturalHeight = natH;
+              img._attrs.src = src;
+              st.viewerTier = tier;
+              st.viewerTransform.scale = natW /
+                (natW * Math.min(1521 / natW, 1013 / natH, 1));
+              v.renderViewerScaleHint();
+              const el = document.querySelector("#viewerScaleHint");
+              return { text: el.textContent,
+                       exact: el.classList.contains("viewer-scale-hint-exact") };
+            };
+            const previewOne = at(2048, 1365, "/p&w=2048", 1);
+            const original = at(7008, 4672, "/p", 3);
+            console.log(JSON.stringify({previewOne, original}));
+            """
+        )
+        self.assertNotIn("已 1:1", result["previewOne"]["text"])
+        self.assertIn("非原图 1:1", result["previewOne"]["text"])
+        self.assertFalse(result["previewOne"]["exact"])
+        self.assertIn("已 1:1", result["original"]["text"])
+        self.assertTrue(result["original"]["exact"])
+
+    def test_viewing_the_original_auto_lands_on_one_to_one(self) -> None:
+        """「查看原图」到货后必须自动落到真实 1:1。
+
+        撤销键盘 `1` 之后，「查看原图」载入原图后的自动落位是 1:1 唯一的触发入口
+        （见 README「大图预览」一节）。本用例走的是**真实的 loadViewerTier 到货
+        回调**：强制换到原图档 -> 预加载探针到货 -> 原图位图解码完成 -> 自动落位，
+        而不是直接调用某个内部函数。
+
+        反向证明：断言落位后的 scale 严格大于 1（7008px 的原图放在 1521px 的舞台上
+        必然要求放大）。若到货回调没有落位，scale 会停在 resetViewerTransform() 之后
+        的 1，assertGreater 即失败——这条断言无法靠「原地不动」蒙混过关。
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            st.items = [{ id: 7, width: 7008, height: 4672, photo_url: "/p",
+                          preview_url: "/p&w=2048" }];
+            const img = document.querySelector("#viewerImage");
+            img.offsetWidth = 1521; img.offsetHeight = 1013;
+            img.naturalWidth = 2048; img.naturalHeight = 1365;
+            img._attrs.src = "/p&w=2048";
+            st.viewerTransform.scale = 1;
+            st.viewerTransform.x = 0; st.viewerTransform.y = 0;
+            // The user clicks 查看原图: skip hysteresis/throttle, request the top tier.
+            v.loadViewerOriginal();
+            const forced = { pending: st.viewerTierPending,
+                             auto: st.viewerTierAutoOneToOne };
+            // The pre-load probe resolves: mount the original and register the
+            // <img> load callback.
+            v._fireLoad(0);
+            // The original bitmap has now decoded -- this is the moment 1:1 is real.
+            img.naturalWidth = 7008; img.naturalHeight = 4672;
+            img._attrs.src = "/p";
+            v._fireElement("viewerImage", "load");
+            const landed = { scale: st.viewerTransform.scale,
+                             oneToOne: v.viewerOneToOneScale(),
+                             x: st.viewerTransform.x,
+                             y: st.viewerTransform.y,
+                             width: parseFloat(img.style.width) };
+            console.log(JSON.stringify({forced, landed}));
+            """
+        )
+        self.assertEqual(result["forced"]["pending"], 3, "查看原图应请求原图档")
+        self.assertTrue(
+            result["forced"]["auto"], "原图档到货后应交给自动落位那段逻辑"
+        )
+        # Landed exactly on the 1:1 point, not left at the fit scale.
+        self.assertAlmostEqual(
+            result["landed"]["scale"], result["landed"]["oneToOne"], places=9
+        )
+        self.assertGreater(
+            result["landed"]["scale"], 1.0, "到货后仍停在整幅显示，未落到 1:1"
+        )
+        # Destination semantics: pan is centred, not left offset by the jump.
+        self.assertEqual(result["landed"]["x"], 0)
+        self.assertEqual(result["landed"]["y"], 0)
+        # The layout width is capped at the 1:1 step: width * residual == naturalWidth.
+        self.assertEqual(round(result["landed"]["width"]), 7008)
+
+
+class ViewerWheelZoomTests(unittest.TestCase):
+    """Viewer scroll-zoom tracks the scroll amount and the input device.
+
+    The complaint under test: one wheel notch zoomed too much. The step used to
+    be a hardcoded ``deltaY < 0 ? 1.18 : 1/1.18`` that ignored how far the user
+    scrolled and which device produced the event.
+
+    These tests drive the real ``viewer.js`` through the same Node harness the
+    tier tests use, so they fail if the calibration is wrong, if the device
+    heuristic never switches, or if the two per-device sensitivities are not
+    actually consulted. Where it matters an assertion is paired with a reverse
+    check: a factor that ignored the sensitivity, or a classifier that always
+    answered the same way, must NOT be able to pass.
+    """
+
+    # Reuse the tier harness (stub DOM + real viewer.js) without re-running its
+    # tests: borrow the machinery by reference rather than by inheritance.
+    SCRIPT = ViewerTierSwapTests.SCRIPT
+    run_viewer = ViewerTierSwapTests.run_viewer
+    setUp = ViewerTierSwapTests.setUp
+    tearDown = ViewerTierSwapTests.tearDown
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        # The borrowed classmethod is already bound to ViewerTierSwapTests, so
+        # calling it directly would stash ``harness``/``web`` on the wrong class.
+        # Call the underlying function with THIS class instead.
+        ViewerTierSwapTests.setUpClass.__func__(cls)
+
+    def test_default_maps_one_reference_notch_to_six_percent(self) -> None:
+        """A canonical notched-wheel step (100px) at 1.0 must be x1.06.
+
+        Reverse proof: the old fixed step was x1.18. The final assertion pins
+        "milder than before", so restoring x1.18 -- or any factor unrelated to
+        the scroll distance -- fails here rather than merely being unasserted.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            v._state.settings = {};          // defaults: both sensitivities 1.0
+            v.resetViewerWheelSession(0);
+            const up = v.viewerWheelZoomFactor({deltaY: -100, deltaMode: 0, timeStamp: 1});
+            v.resetViewerWheelSession(0);
+            const down = v.viewerWheelZoomFactor({deltaY: 100, deltaMode: 0, timeStamp: 1});
+            console.log(JSON.stringify({up, down, product: up * down}));
+            """
+        )
+        self.assertAlmostEqual(result["up"], 1.06, places=6)
+        self.assertAlmostEqual(result["down"], 1 / 1.06, places=6)
+        # exp(a) * exp(-a) == 1: zoom in N notches then out N notches returns.
+        self.assertAlmostEqual(result["product"], 1.0, places=9)
+        self.assertLess(result["up"], 1.18)
+
+    def test_sensitivity_scales_the_factor_and_is_clamped(self) -> None:
+        """The slider really multiplies the step; out-of-range values clamp.
+
+        Reverse proof: a factor independent of ``deviceSensitivity`` would make
+        all three readings equal and the strict inequalities below fail.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const ev = {deltaY: -100, deltaMode: 0, timeStamp: 1};
+            const at = (sens) => {
+              v._state.settings = {viewer_wheel_device: "mouse",
+                                   viewer_wheel_mouse_sensitivity: sens};
+              v.resetViewerWheelSession(0);
+              return v.viewerWheelZoomFactor(ev);
+            };
+            console.log(JSON.stringify({half: at(0.5), one: at(1.0), two: at(2.0),
+                                        over: at(5.0), under: at(0.1)}));
+            """
+        )
+        self.assertAlmostEqual(result["one"], 1.06, places=6)
+        self.assertAlmostEqual(result["two"], 1.06**2, places=6)
+        self.assertAlmostEqual(result["half"], 1.06**0.5, places=6)
+        self.assertLess(result["half"], result["one"])
+        self.assertLess(result["one"], result["two"])
+        # Clamp: 5.0 -> 2.0 and 0.1 -> 0.5, so the extremes equal the endpoints.
+        self.assertAlmostEqual(result["over"], result["two"], places=9)
+        self.assertAlmostEqual(result["under"], result["half"], places=9)
+
+    def test_trackpad_and_mouse_sensitivities_are_independent(self) -> None:
+        """Two devices, two settings -- each event uses its own sensitivity.
+
+        Reverse proof: if the handler read a single shared sensitivity the two
+        factors below would be equal.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            v._state.settings = {viewer_wheel_trackpad_sensitivity: 2.0,
+                                 viewer_wheel_mouse_sensitivity: 0.5,
+                                 viewer_wheel_device: "auto"};
+            v.resetViewerWheelSession(0);
+            const mouse = v.viewerWheelZoomFactor({deltaY: -100, deltaMode: 0, timeStamp: 1});
+            v.resetViewerWheelSession(0);
+            const trackpad = v.viewerWheelZoomFactor({deltaY: -2, deltaMode: 0, timeStamp: 1});
+            const base = v.VIEWER_WHEEL_BASE;
+            console.log(JSON.stringify({mouse, trackpad,
+              mouseExpected: Math.exp(100 * base * 0.5),
+              trackpadExpected: Math.exp(2 * base * 2.0)}));
+            """
+        )
+        self.assertAlmostEqual(result["mouse"], result["mouseExpected"], places=9)
+        self.assertAlmostEqual(
+            result["trackpad"], result["trackpadExpected"], places=9
+        )
+        self.assertNotAlmostEqual(result["mouse"], result["trackpad"], places=3)
+
+    def test_device_heuristic_switches_on_real_scroll_signatures(self) -> None:
+        """Discrete large deltas -> mouse; dense tiny deltas -> trackpad.
+
+        Reverse proof: a classifier that always answered one device would fail
+        one half, and flipping only ``deltaMode`` -- the documented, device-
+        correlated unit signal -- must be enough to flip the verdict.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            v.resetViewerWheelSession(0);
+            const mouse = v.viewerWheelDeviceKind({deltaY: -100, deltaMode: 0, timeStamp: 1});
+            // A trackpad gesture: many small, strongly varying pixel deltas.
+            v.resetViewerWheelSession(0);
+            const mags = [1, 4, 1.5, 5, 2, 6, 1];
+            let trackpad = "";
+            mags.forEach((m, i) => {
+              trackpad = v.viewerWheelDeviceKind(
+                {deltaY: m, deltaMode: 0, timeStamp: 10 + i * 8});
+            });
+            // Firefox-style line mode on a notched wheel: one line is a notch.
+            v.resetViewerWheelSession(0);
+            const lines = v.viewerWheelDeviceKind({deltaY: 1, deltaMode: 1, timeStamp: 1});
+            console.log(JSON.stringify({mouse, trackpad, lines}));
+            """
+        )
+        self.assertEqual(result["mouse"], "mouse")
+        self.assertEqual(result["trackpad"], "trackpad")
+        self.assertEqual(result["lines"], "mouse")
+        self.assertNotEqual(result["mouse"], result["trackpad"])
+
+    def test_manual_override_beats_the_heuristic(self) -> None:
+        """The 输入设备 choice wins over automatic detection.
+
+        Reverse proof: with the override ignored, the tiny trackpad-shaped
+        delta would classify as trackpad and the first assertion would fail.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            v.resetViewerWheelSession(0);
+            v._state.settings = {viewer_wheel_device: "mouse"};
+            const forcedMouse = v.viewerWheelDevice({deltaY: -2, deltaMode: 0, timeStamp: 1});
+            v.resetViewerWheelSession(0);
+            v._state.settings = {viewer_wheel_device: "trackpad"};
+            const forcedTrackpad = v.viewerWheelDevice({deltaY: -100, deltaMode: 0, timeStamp: 1});
+            v.resetViewerWheelSession(0);
+            v._state.settings = {viewer_wheel_device: "auto"};
+            const autoSmall = v.viewerWheelDevice({deltaY: -2, deltaMode: 0, timeStamp: 1});
+            console.log(JSON.stringify({forcedMouse, forcedTrackpad, autoSmall}));
+            """
+        )
+        self.assertEqual(result["forcedMouse"], "mouse")
+        self.assertEqual(result["forcedTrackpad"], "trackpad")
+        # Auto mode on the same small event agrees with the raw heuristic.
+        self.assertEqual(result["autoSmall"], "trackpad")
+
+    def test_delta_mode_is_normalised_to_pixels(self) -> None:
+        """Line/page deltas are converted to pixels before the exponent.
+
+        Reverse proof: if ``deltaMode`` were ignored, the line-mode factor would
+        equal the raw 3px factor instead of the 48px equivalent.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            v._state.settings = {viewer_wheel_device: "mouse"};
+            const px = v.viewerWheelPixels({deltaY: 100, deltaMode: 0});
+            const lines = v.viewerWheelPixels({deltaY: 3, deltaMode: 1});
+            const pages = v.viewerWheelPixels({deltaY: 1, deltaMode: 2});
+            v.resetViewerWheelSession(0);
+            const lineFactor = v.viewerWheelZoomFactor({deltaY: -3, deltaMode: 1, timeStamp: 1});
+            v.resetViewerWheelSession(0);
+            const equivalent = v.viewerWheelZoomFactor(
+              {deltaY: -3 * v.VIEWER_WHEEL_LINE_PX, deltaMode: 0, timeStamp: 1});
+            v.resetViewerWheelSession(0);
+            const rawThree = v.viewerWheelZoomFactor({deltaY: -3, deltaMode: 0, timeStamp: 1});
+            console.log(JSON.stringify({px, lines, pages, lineFactor, equivalent, rawThree,
+              linePx: v.VIEWER_WHEEL_LINE_PX, pagePx: v.VIEWER_WHEEL_PAGE_PX}));
+            """
+        )
+        self.assertEqual(result["px"], 100)
+        self.assertEqual(result["lines"], 3 * result["linePx"])
+        self.assertEqual(result["pages"], result["pagePx"])
+        self.assertAlmostEqual(result["lineFactor"], result["equivalent"], places=9)
+        self.assertGreater(result["lineFactor"], result["rawThree"])
+
+    def test_a_long_gap_starts_a_new_session(self) -> None:
+        """A mouse scroll must not keep classifying the next trackpad gesture.
+
+        Reverse proof: the three notched events leave a high running mouse
+        score. If the session were never reopened, that score would outlast the
+        gap and the small event after it would misread as a mouse; the final
+        assertion pins the reset specifically.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const notched = (t) => v.viewerWheelDeviceKind(
+              {deltaY: -100, deltaMode: 0, timeStamp: t});
+            v.resetViewerWheelSession(0);
+            notched(1); notched(40); notched(80);       // running mouse score = 6
+            // Same session, no gap: the mouse history is retained -> mouse.
+            const sameSessionSmall = v.viewerWheelDeviceKind(
+              {deltaY: -2, deltaMode: 0, timeStamp: 120});
+            // A >250ms gap reopens the session, so the small event is judged
+            // alone -> trackpad. Without the reset it would still be "mouse".
+            const newSessionSmall = v.viewerWheelDeviceKind(
+              {deltaY: -2, deltaMode: 0, timeStamp: 1000});
+            console.log(JSON.stringify({sameSessionSmall, newSessionSmall}));
+            """
+        )
+        self.assertEqual(result["sameSessionSmall"], "mouse")
+        self.assertEqual(result["newSessionSmall"], "trackpad")
+
+    def test_fit_highlight_marks_only_the_fit_view_state(self) -> None:
+        """适应 lights only while the photo is shown whole.
+
+        The 1:1 button was removed, so 适应 (scale 1, photo larger than the
+        stage) is the only segmented-control state left to highlight. The
+        criterion is shared with the scale hint, so a photo that already IS
+        1:1 at scale 1 must not light 适应 either.
+
+        Reverse proof: the three expectations differ, so a sync that always lit
+        or never lit the button would fail at least one case.
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            const fit = document.querySelector("#viewerFit");
+            const img = document.querySelector("#viewerImage");
+            img.parentElement.clientWidth = 1521;
+            img.parentElement.clientHeight = 1013;
+            const active = () => fit.classList.contains("viewer-zoom-active");
+            // Big photo at fit: 整幅显示 -> 适应 lit.
+            img.naturalWidth = 4000; img.naturalHeight = 2667; img.offsetWidth = 1520;
+            st.viewerTransform.scale = 1;
+            v.renderViewerZoomState();
+            const atFit = active();
+            // A photo smaller than the stage IS 1:1 at scale 1 -> 适应 not lit.
+            img.naturalWidth = 1000; img.naturalHeight = 667; img.offsetWidth = 1000;
+            st.viewerTransform.scale = 1;
+            v.renderViewerZoomState();
+            const atOneToOne = active();
+            // Zoomed to an intermediate倍率: 适应 is not the current state.
+            img.naturalWidth = 4000; img.naturalHeight = 2667; img.offsetWidth = 1520;
+            st.viewerTransform.scale = 3;
+            v.renderViewerZoomState();
+            const zoomed = active();
+            console.log(JSON.stringify({atFit, atOneToOne, zoomed}));
+            """
+        )
+        self.assertTrue(result["atFit"])
+        self.assertFalse(result["atOneToOne"])
+        self.assertFalse(result["zoomed"])
+
+
+class DisplayPreviewEncodingTests(unittest.TestCase):
+    """The preview encoder and its cache must actually change together.
+
+    A chroma-subsampling fix that leaves the cache key alone is inert: every
+    already-cached photo keeps being served the old bytes, and the fix appears
+    to do nothing. ``display_asset.ASSET_FORMAT_TAG`` already fixed this once for
+    card thumbnails; the display preview had the same latent bug.
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.source = self.root / "IMG.JPG"
+        Image.new("RGB", (3000, 2000), (120, 90, 60)).save(
+            self.source, "JPEG", quality=95
+        )
+        self.thumbnail = self.root / "IMG.thumb.jpg"
+        Image.new("RGB", (512, 341), (120, 90, 60)).save(
+            self.thumbnail, "JPEG"
+        )
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def test_previews_keep_full_chroma_resolution(self) -> None:
+        """4:2:0 halves the chroma plane; the viewer is for judging detail."""
+        preview = ensure_display_preview(
+            self.source, self.thumbnail, max_size=(2048, 2048)
+        )
+        with Image.open(preview) as image:
+            layers = image.layer
+        # Pillow reports JPEG components as (id, h, v, quantisation table id).
+        # YCbCr 4:2:0 halves the chroma planes in BOTH axes -- they come back as
+        # (2, 1, 1, ...) and (3, 1, 1, ...). 4:4:4 keeps every plane full size,
+        # so both chroma planes must read (2, 1, 1) / (3, 1, 1) *and* the luma
+        # plane (1, 1, 1). Asserting the luma plane alone would pass for 4:2:0
+        # too, so the chroma planes are what actually carry the claim.
+        self.assertEqual(layers[0][:3], (1, 1, 1), f"亮度平面被减半：{layers}")
+        self.assertEqual(layers[1][:3], (2, 1, 1), f"色度 Cb 被减半：{layers}")
+        self.assertEqual(layers[2][:3], (3, 1, 1), f"色度 Cr 被减半：{layers}")
+
+    def test_the_encoder_tag_is_part_of_the_cache_key(self) -> None:
+        """Changing encoder settings must invalidate existing cached files."""
+        before = display_preview_path(self.source, self.thumbnail, (2048, 2048))
+        with mock.patch.object(
+            media, "DISPLAY_PREVIEW_FORMAT_TAG", "q92-s444-v2"
+        ):
+            after = display_preview_path(
+                self.source, self.thumbnail, (2048, 2048)
+            )
+        self.assertNotEqual(
+            before, after, "编码参数没进指纹，旧缓存会继续被命中"
+        )
+
+    def test_sibling_widths_survive_each_other(self) -> None:
+        """The 2048 and 4096 renditions of one photo must coexist.
+
+        The prune used to keep a single slot and delete whichever rendition was
+        built second. Under a three-tier viewer that means every zoom-in and
+        zoom-out re-decodes the source, which on this library costs a ~20MB read
+        from the NAS each time.
+        """
+        narrow = ensure_display_preview(
+            self.source, self.thumbnail, max_size=(2048, 2048)
+        )
+        wide = ensure_display_preview(
+            self.source, self.thumbnail, max_size=(4096, 4096)
+        )
+        self.assertTrue(narrow.is_file(), "建完 4096 之后 2048 档被删了")
+        self.assertTrue(wide.is_file())
+
+    def test_stale_fingerprints_of_the_same_width_are_still_pruned(self) -> None:
+        """Coexisting tiers must not turn the cache into a leak.
+
+        Within one width the fingerprint is the only thing that can go stale
+        (the source file changed), and that is still what gets cleaned up.
+        """
+        narrow = ensure_display_preview(
+            self.source, self.thumbnail, max_size=(2048, 2048)
+        )
+        wide = ensure_display_preview(
+            self.source, self.thumbnail, max_size=(4096, 4096)
+        )
+        # Change the source so its size/mtime fingerprint moves.
+        self.source.write_bytes(self.source.read_bytes() + b"\x00")
+        rebuilt = ensure_display_preview(
+            self.source, self.thumbnail, max_size=(2048, 2048)
+        )
+        same_width = sorted(
+            path.name for path in self.root.glob("*.display-w2048-*.jpg")
+        )
+        self.assertEqual(len(same_width), 1, f"同宽度的旧指纹没清理：{same_width}")
+        self.assertNotEqual(narrow, rebuilt)
+        self.assertTrue(wide.is_file(), "剪枝误伤了其它档位")
 
 
 if __name__ == "__main__":

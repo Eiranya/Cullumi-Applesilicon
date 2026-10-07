@@ -239,6 +239,33 @@ def _normalize_simple_settings(
         normalized["theme"] = defaults["theme"]
         issues.append("主题值无效")
 
+    for key in (
+        "viewer_wheel_trackpad_sensitivity",
+        "viewer_wheel_mouse_sensitivity",
+    ):
+        value = loaded.get(key, defaults[key])
+        # `bool` is an `int` subclass; True would slip through float() as 1.0.
+        number = float("nan")
+        if not isinstance(value, bool):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                number = float("nan")
+        if not math.isfinite(number) or not 0.5 <= number <= 2.0:
+            normalized[key] = defaults[key]
+            if key in loaded:
+                issues.append(f"{key} 超出允许范围")
+        else:
+            normalized[key] = round(number, 2)
+
+    device = loaded.get("viewer_wheel_device", defaults["viewer_wheel_device"])
+    if isinstance(device, str) and device in {"auto", "trackpad", "mouse"}:
+        normalized["viewer_wheel_device"] = device
+    else:
+        normalized["viewer_wheel_device"] = defaults["viewer_wheel_device"]
+        if "viewer_wheel_device" in loaded:
+            issues.append("查看器输入设备设置无效")
+
 
 def _normalize_custom_profiles(
     raw_profiles: Any, issues: list[str]
@@ -399,6 +426,14 @@ class ConfigStore:
             "niqe_analysis_enabled": True,
             "sync_variant_decisions": True,
             "motion_cover_writeback": "ask",
+            # Viewer wheel zoom. The device (trackpad vs. mouse) can only be
+            # inferred from scroll characteristics, and the heuristic will be
+            # wrong sometimes, so the device is also user-overridable. Two
+            # separate sensitivities because one wheel notch (~100px) and one
+            # trackpad event (<3px) differ by ~30x in raw deltaY.
+            "viewer_wheel_trackpad_sensitivity": 1.0,
+            "viewer_wheel_mouse_sensitivity": 1.0,
+            "viewer_wheel_device": "auto",
             "theme": "day",
             "projects": {},
             "recent_projects": [],

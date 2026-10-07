@@ -1,0 +1,89 @@
+{
+  "dpr1": {
+    "render_px": [
+      215,
+      161
+    ],
+    "content_px": [
+      215,
+      143
+    ],
+    "lapvar_full": 1541.3,
+    "lapvar_content": 1163.0
+  },
+  "dpr2": {
+    "render_px": [
+      430,
+      322
+    ],
+    "content_px": [
+      430,
+      287
+    ],
+    "lapvar_full": 646.8,
+    "lapvar_content": 444.5
+  },
+  "ir-auto": {
+    "render_px": [
+      215,
+      161
+    ],
+    "content_px": [
+      215,
+      143
+    ],
+    "lapvar_full": 1541.3,
+    "lapvar_content": 1163.0
+  },
+  "ir-default": {
+    "render_px": [
+      215,
+      161
+    ],
+    "content_px": [
+      215,
+      143
+    ],
+    "lapvar_full": 1541.3,
+    "lapvar_content": 1163.0
+  },
+  "ir-high-quality": {
+    "render_px": [
+      215,
+      161
+    ],
+    "content_px": [
+      215,
+      143
+    ],
+    "lapvar_full": 1541.3,
+    "lapvar_content": 1163.0
+  },
+  "ir-pixelated": {
+    "render_px": [
+      215,
+      161
+    ],
+    "content_px": [
+      215,
+      143
+    ],
+    "lapvar_full": 2681.2,
+    "lapvar_content": 2447.3
+  },
+  "ir-webkit-optimize-contrast": {
+    "render_px": [
+      215,
+      161
+    ],
+    "content_px": [
+      215,
+      143
+    ],
+    "lapvar_full": 2681.2,
+    "lapvar_content": 2447.3
+  },
+  "dpr2_normalized_to_css": {
+    "lapvar": 1511.5
+  }
+}

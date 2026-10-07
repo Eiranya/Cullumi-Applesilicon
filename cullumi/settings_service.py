@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,31 @@ def save_settings(config: ConfigStore, body: dict[str, Any]) -> dict[str, Any]:
         if writeback not in {"never", "ask", "always"}:
             raise ValueError("动态照片封面修改设置无效")
         updates["motion_cover_writeback"] = writeback
+
+    for key in (
+        "viewer_wheel_trackpad_sensitivity",
+        "viewer_wheel_mouse_sensitivity",
+    ):
+        if key not in body:
+            continue
+        raw = body[key]
+        # Reject bools explicitly: `True` is an `int` and would quietly persist
+        # as a sensitivity of 1.0 instead of being treated as malformed input.
+        if isinstance(raw, bool):
+            raise ValueError(f"{key} 必须为数字")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"{key} 必须为数字") from error
+        if not math.isfinite(value) or not 0.5 <= value <= 2.0:
+            raise ValueError(f"{key} 超出允许范围 0.5–2.0")
+        updates[key] = round(value, 2)
+
+    if "viewer_wheel_device" in body:
+        device = str(body["viewer_wheel_device"])
+        if device not in {"auto", "trackpad", "mouse"}:
+            raise ValueError("查看器输入设备设置无效")
+        updates["viewer_wheel_device"] = device
 
     cache_path = None
     if "default_cache_root" in body:

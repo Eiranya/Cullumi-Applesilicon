@@ -912,6 +912,47 @@ function bindSettingsEvents() {
       toast(`保存原图修改设置失败：${error.message}`);
     }
   };
+  // 滚轮灵敏度：拖动时只更新读数（oninput），松手（onchange）才落盘一次，避免每一
+  // 格都打一次 /api/settings。保存失败要把滑杆退回旧值，否则界面会显示一个没存上的数。
+  [
+    ["viewerWheelTrackpad", "viewer_wheel_trackpad_sensitivity"],
+    ["viewerWheelMouse", "viewer_wheel_mouse_sensitivity"],
+  ].forEach(([id, key]) => {
+    const input = $(`#${id}`),
+      output = $(`#${id}Value`),
+      render = () => {
+        output.textContent = `${Number(input.value).toFixed(1)}×`;
+      };
+    input.oninput = render;
+    input.onchange = async () => {
+      const previous = Number(state.settings[key]) || 1;
+      try {
+        const saved = await json("/api/settings", { [key]: Number(input.value) });
+        state.settings[key] = Number(saved.settings[key]);
+        input.value = String(state.settings[key]);
+      } catch (error) {
+        input.value = String(previous);
+        toast(`保存滚轮灵敏度失败：${error.message}`);
+      }
+      render();
+    };
+    render();
+  });
+  // 输入设备：自动识别是启发式、会判错，所以必须让用户能强制指定。
+  $("#viewerWheelDevice").onchange = async (event) => {
+    const previous = state.settings.viewer_wheel_device || "auto";
+    try {
+      const saved = await json("/api/settings", {
+        viewer_wheel_device: event.target.value,
+      });
+      state.settings.viewer_wheel_device =
+        saved.settings.viewer_wheel_device || event.target.value;
+      event.target.value = state.settings.viewer_wheel_device;
+    } catch (error) {
+      event.target.value = previous;
+      toast(`保存输入设备设置失败：${error.message}`);
+    }
+  };
   $("#checkUpdateBtn").onclick = () => checkForUpdates(true);
   $("#defaultCacheBtn").onclick = chooseDefaultCache;
   $("#projectCacheBtn").onclick = migrateProjectCache;

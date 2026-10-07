@@ -1,0 +1,98 @@
+{
+  "ideal_source_to_box": [
+    215,
+    143
+  ],
+  "variants": {
+    "PIL_LANCZOS": {
+      "size": [
+        215,
+        143
+      ],
+      "lapvar": 1481.6,
+      "mse_vs_ideal": 4.47,
+      "edge_overshoot": 1.59
+    },
+    "PIL_BICUBIC": {
+      "size": [
+        215,
+        143
+      ],
+      "lapvar": 1192.0,
+      "mse_vs_ideal": 4.84,
+      "edge_overshoot": 1.07
+    },
+    "PIL_BILINEAR": {
+      "size": [
+        215,
+        143
+      ],
+      "lapvar": 779.6,
+      "mse_vs_ideal": 12.46,
+      "edge_overshoot": 0.83
+    },
+    "PIL_BOX": {
+      "size": [
+        215,
+        143
+      ],
+      "lapvar": 1365.5,
+      "mse_vs_ideal": 13.61,
+      "edge_overshoot": 0.99
+    },
+    "PIL_NEAREST": {
+      "size": [
+        215,
+        143
+      ],
+      "lapvar": 2626.4,
+      "mse_vs_ideal": 48.7,
+      "edge_overshoot": 4.73
+    },
+    "PIL_原图直落LANCZOS（理想）": {
+      "size": [
+        215,
+        143
+      ],
+      "lapvar": 1355.9,
+      "mse_vs_ideal": 0.0,
+      "edge_overshoot": 1.53
+    },
+    "WebKit_tight-ir-webkit-optimize-contrast@dpr1": {
+      "size": [
+        215,
+        143
+      ],
+      "lapvar": 2444.9,
+      "mse_vs_ideal": 45.45,
+      "edge_overshoot": 3.42
+    },
+    "WebKit_tight-ir-webkit-optimize-contrast@dpr2": {
+      "size": [
+        215,
+        143
+      ],
+      "lapvar": 1405.9,
+      "mse_vs_ideal": 14.21,
+      "edge_overshoot": 1.69
+    },
+    "WebKit_tight-irdefault@dpr1": {
+      "size": [
+        215,
+        143
+      ],
+      "lapvar": 1163.0,
+      "mse_vs_ideal": 23.19,
+      "edge_overshoot": 1.03
+    },
+    "WebKit_tight-irdefault@dpr2": {
+      "size": [
+        215,
+        143
+      ],
+      "lapvar": 1370.5,
+      "mse_vs_ideal": 4.91,
+      "edge_overshoot": 1.46
+    }
+  }
+}

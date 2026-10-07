@@ -1,0 +1,161 @@
+{
+  "note": "三种指标一起看；lapvar 与 MSE 可能方向相反",
+  "rows": [
+    {
+      "dpr": 1,
+      "served_px": 215,
+      "device_px_needed": 215,
+      "downscale_ratio": 1.0,
+      "content_size": [
+        215,
+        143
+      ],
+      "lapvar": 1355.9,
+      "mse_vs_ideal": 0.54,
+      "edge_overshoot": 1.53
+    },
+    {
+      "dpr": 1,
+      "served_px": 216,
+      "device_px_needed": 215,
+      "downscale_ratio": 1.0,
+      "content_size": [
+        215,
+        143
+      ],
+      "lapvar": 812.0,
+      "mse_vs_ideal": 21.87,
+      "edge_overshoot": 1.47
+    },
+    {
+      "dpr": 1,
+      "served_px": 256,
+      "device_px_needed": 215,
+      "downscale_ratio": 1.19,
+      "content_size": [
+        215,
+        144
+      ],
+      "lapvar": 1091.8,
+      "mse_vs_ideal": 5.82,
+      "edge_overshoot": 1.5
+    },
+    {
+      "dpr": 1,
+      "served_px": 341,
+      "device_px_needed": 215,
+      "downscale_ratio": 1.58,
+      "content_size": [
+        215,
+        143
+      ],
+      "lapvar": 1194.5,
+      "mse_vs_ideal": 9.44,
+      "edge_overshoot": 1.0
+    },
+    {
+      "dpr": 1,
+      "served_px": 430,
+      "device_px_needed": 215,
+      "downscale_ratio": 2.0,
+      "content_size": [
+        215,
+        144
+      ],
+      "lapvar": 1203.5,
+      "mse_vs_ideal": 16.01,
+      "edge_overshoot": 0.95
+    },
+    {
+      "dpr": 1,
+      "served_px": 512,
+      "device_px_needed": 215,
+      "downscale_ratio": 2.38,
+      "content_size": [
+        215,
+        143
+      ],
+      "lapvar": 1216.5,
+      "mse_vs_ideal": 20.85,
+      "edge_overshoot": 0.72
+    },
+    {
+      "dpr": 2,
+      "served_px": 215,
+      "device_px_needed": 430,
+      "downscale_ratio": 0.5,
+      "content_size": [
+        430,
+        287
+      ],
+      "lapvar": 225.3,
+      "mse_vs_ideal": 59.33,
+      "edge_overshoot": 0.15
+    },
+    {
+      "dpr": 2,
+      "served_px": 216,
+      "device_px_needed": 430,
+      "downscale_ratio": 0.5,
+      "content_size": [
+        430,
+        287
+      ],
+      "lapvar": 199.1,
+      "mse_vs_ideal": 59.01,
+      "edge_overshoot": 0.1
+    },
+    {
+      "dpr": 2,
+      "served_px": 256,
+      "device_px_needed": 430,
+      "downscale_ratio": 0.59,
+      "content_size": [
+        430,
+        287
+      ],
+      "lapvar": 230.1,
+      "mse_vs_ideal": 42.28,
+      "edge_overshoot": 0.05
+    },
+    {
+      "dpr": 2,
+      "served_px": 341,
+      "device_px_needed": 430,
+      "downscale_ratio": 0.79,
+      "content_size": [
+        430,
+        287
+      ],
+      "lapvar": 290.6,
+      "mse_vs_ideal": 21.06,
+      "edge_overshoot": 0.99
+    },
+    {
+      "dpr": 2,
+      "served_px": 430,
+      "device_px_needed": 430,
+      "downscale_ratio": 1.0,
+      "content_size": [
+        430,
+        287
+      ],
+      "lapvar": 616.7,
+      "mse_vs_ideal": 0.36,
+      "edge_overshoot": 2.15
+    },
+    {
+      "dpr": 2,
+      "served_px": 512,
+      "device_px_needed": 430,
+      "downscale_ratio": 1.19,
+      "content_size": [
+        430,
+        287
+      ],
+      "lapvar": 497.7,
+      "mse_vs_ideal": 2.67,
+      "edge_overshoot": 1.59
+    }
+  ]
+}

@@ -1,0 +1,143 @@
+{
+  "source": {
+    "photos": 694,
+    "extensions": {
+      ".jpg": 694
+    },
+    "distinct_sizes": {
+      "7008x4672": 262,
+      "4672x7008": 432
+    },
+    "min_megapixels": 32.741,
+    "max_megapixels": 32.741,
+    "status": {
+      "active": 423,
+      "quarantined": 271
+    }
+  },
+  "thumbnail": {
+    "count": 694,
+    "distinct_sizes": {
+      "341x512": 432,
+      "512x341": 262
+    },
+    "max_long_edge": 512
+  },
+  "display_preview_cache": {
+    "files": 0,
+    "extensions_served_verbatim_by_api_photo": [
+      ".jpg",
+      ".jpeg"
+    ]
+  },
+  "sample": {
+    "relative_path": "DSC02017.JPG",
+    "source_file": "/Users/inori95/Pictures/未命名文件夹/DSC02017.JPG",
+    "source_exists": true,
+    "source_size": [
+      7008,
+      4672
+    ],
+    "on_disk_thumb": "/Users/inori95/Library/Application Support/Cullumi/projects/7d97e62d523c8ec6/thumbs/9b7ed8bba7a6991cc84e71bc5842bd5a8b4a80ab.jpg",
+    "on_disk_thumb_size": [
+      512,
+      341
+    ],
+    "on_disk_thumb_bytes": 32110,
+    "on_disk_jpeg": {
+      "sof": "0xC0",
+      "sampling": "4:2:0"
+    },
+    "on_disk_lapvar": 531.7,
+    "source_bytes": 18258245,
+    "source_jpeg": {
+      "sof": "0xC0",
+      "sampling": "4:2:2"
+    },
+    "ideal512_lapvar": 535.8,
+    "on_disk_vs_ideal512_ratio": 0.992,
+    "on_disk_vs_ideal512_mse": 11.015,
+    "draft_decode_size": [
+      876,
+      584
+    ],
+    "draft_path_vs_ideal512_mse": 0.678,
+    "draft_path_vs_ondisk_mse": 10.024,
+    "encode_q86_420_mse_vs_ideal512": 10.768,
+    "encode_q86_420_lapvar": 564.6,
+    "encode_q95_444_mse_vs_ideal512": 2.703,
+    "encode_q95_444_lapvar": 557.4,
+    "encode_q95_420_mse_vs_ideal512": 3.862,
+    "encode_q95_420_lapvar": 557.4
+  },
+  "resample_reference": {
+    "box": [
+      213,
+      160
+    ],
+    "note": "PIL 侧对照，非浏览器",
+    "512_to_box_LANCZOS": 1381.8,
+    "original_to_box_LANCZOS": 1400.8,
+    "512_to_box_BICUBIC": 1110.6,
+    "original_to_box_BICUBIC": 1126.5,
+    "512_to_box_BILINEAR": 729.0,
+    "original_to_box_BILINEAR": 734.8,
+    "512_to_box_BOX": 1279.2,
+    "original_to_box_BOX": 1185.0,
+    "512_to_box_NEAREST": 2450.8,
+    "original_to_box_NEAREST": 3324.8,
+    "512_to_box_HAMMING": 1052.8,
+    "original_to_box_HAMMING": 1068.5
+  },
+  "source_size_sweep_pil": {
+    "128": {
+      "source_px": [
+        128,
+        85
+      ],
+      "onscreen_lapvar_lanczos": 344.6
+    },
+    "213": {
+      "source_px": [
+        213,
+        142
+      ],
+      "onscreen_lapvar_lanczos": 1099.6
+    },
+    "256": {
+      "source_px": [
+        256,
+        171
+      ],
+      "onscreen_lapvar_lanczos": 1245.6
+    },
+    "341": {
+      "source_px": [
+        341,
+        227
+      ],
+      "onscreen_lapvar_lanczos": 1359.6
+    },
+    "426": {
+      "source_px": [
+        426,
+        284
+      ],
+      "onscreen_lapvar_lanczos": 1385.7
+    },
+    "512": {
+      "source_px": [
+        512,
+        341
+      ],
+      "onscreen_lapvar_lanczos": 1395.8
+    },
+    "1024": {
+      "source_px": [
+        1024,
+        683
+      ],
+      "onscreen_lapvar_lanczos": 1397.7
+    }
+  }
+}

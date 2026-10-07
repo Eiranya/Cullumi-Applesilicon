@@ -100,6 +100,19 @@ async function boot() {
     b.settings.sync_variant_decisions !== false;
   $("#autoCheckUpdates").checked = !!b.settings.auto_check_updates;
   $("#motionCoverWriteback").value = b.settings.motion_cover_writeback || "ask";
+  [
+    ["viewerWheelTrackpad", "viewer_wheel_trackpad_sensitivity"],
+    ["viewerWheelMouse", "viewer_wheel_mouse_sensitivity"],
+  ].forEach(([id, key]) => {
+    const input = $(`#${id}`),
+      value = Number(b.settings[key]),
+      bounded = Number.isFinite(value)
+        ? Math.min(2, Math.max(0.5, value))
+        : 1;
+    input.value = String(bounded);
+    $(`#${id}Value`).textContent = `${bounded.toFixed(1)}×`;
+  });
+  $("#viewerWheelDevice").value = b.settings.viewer_wheel_device || "auto";
   $("#defaultCache").value = b.settings.default_cache_root;
   renderRecentProjects();
   hydrateRecentProjects(generation);

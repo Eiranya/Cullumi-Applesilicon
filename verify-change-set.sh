@@ -49,7 +49,9 @@ fi
 # cullumi/classification.py       quality reasons in plain words, not metric names;
 #                                 library counts folded to one per capture group
 #                                 so the sidebar matches the cards on screen
-# cullumi/config.py               macOS app-data dir; blink_gpu_enabled default
+# cullumi/config.py               macOS app-data dir; blink_gpu_enabled default;
+#                                 viewer wheel-sensitivity defaults + validation
+#                                 (trackpad / mouse / input-device)
 # cullumi/decision_service.py     report which photos a synced decision folded
 #                                 away, so the library can show one card per
 #                                 capture group instead of one per format
@@ -57,12 +59,21 @@ fi
 # cullumi/http_api.py             platform-aware update message; GPU setting;
 #                                 optional &w= supply width on /api/photo so the
 #                                 viewer loads a preview and fetches the
-#                                 original only on request
-# cullumi/media.py                RAW EXIF from the TIFF IFD chain
+#                                 original only on request; expose the viewer
+#                                 wheel-sensitivity defaults on /api/bootstrap
+# cullumi/media.py                RAW EXIF from the TIFF IFD chain; display
+#                                 preview encoded 4:4:4 (Pillow defaults to
+#                                 4:2:0 for large images, halving chroma), with
+#                                 the encoder settings folded into the cache
+#                                 fingerprint and the stale-file prune scoped to
+#                                 one width so the viewer's 2048/4096/original
+#                                 tiers can coexist
 # cullumi/native_dialogs.py       macOS file dialogs via pywebview
 # cullumi/photo_query_service.py  expose similarity-group processing status;
 #                                 per-photo preview_url alongside photo_url
-# cullumi/settings_service.py     accept blink_gpu_enabled in the settings route
+# cullumi/settings_service.py     accept blink_gpu_enabled in the settings route;
+#                                 validate + persist the viewer wheel sensitivities
+#                                 and input-device choice
 # cullumi/similarity.py           derive the group processing status
 # cullumi/updates.py              .dmg whitelist; winreg guarded
 # tests/test_analysis_worker.py   worker-pool test updated for the new sizing
@@ -76,23 +87,52 @@ fi
 # web/css/home.css                drag-and-drop highlight for the empty state
 # web/css/workspace.css           group processing-status badge
 # web/css/viewer.css              viewer: loading indicator for the on-demand
-#                                 original, the 1:1 / fit / view-original
-#                                 buttons, and the scale-state hint line
+#                                 original, the fit / view-original buttons, and
+#                                 the scale-state hint line. Now also groups those
+#                                 two buttons into a right-aligned segmented control
+#                                 (fit active-state highlight) and styles the
+#                                 wheel-sensitivity layout.
+# web/css/settings.css            owner of the settings-row slider styling for the
+#                                 viewer wheel sensitivities (trackpad / mouse)
+#                                 and their live value readout
 # web/index.html                  hardware-acceleration switch; plain-word labels;
-#                                 viewer zoom controls and loading indicator
+#                                 viewer zoom controls grouped into a right-aligned
+#                                 segmented control; wheel-sensitivity sliders and
+#                                 input-device picker; loading indicator
 # web/js/app.js                   bind the drag-and-drop affordance; F loads the
-#                                 original, 1 toggles 1:1, 0 fits the window
+#                                 original, 0 fits the window. The `1` key that
+#                                 used to toggle 1:1 was withdrawn (owner ruling);
+#                                 1:1 now arrives only via 查看原图's auto-land
 # web/js/gallery.js               refresh the group badge after a decision
-# web/js/runtime.js               statusFilter in the shared view state
-# web/js/session.js               GPU status on boot; drop accept/reject entry points
-# web/js/settings.js              platform-aware update text; GPU switch handler
+# web/js/runtime.js               statusFilter in the shared view state; the
+#                                 viewer's display-tier bookkeeping (mounted
+#                                 tier, in-flight tier, debounce handle)
+# web/js/session.js               GPU status on boot; drop accept/reject entry
+#                                 points; restore the wheel-sensitivity sliders
+#                                 and input-device picker on boot
+# web/js/settings.js              platform-aware update text; GPU switch handler;
+#                                 wheel-sensitivity slider + input-device handlers
 # web/js/similar.js               render + live-update the group status badge
-# web/js/viewer.js                viewer: on-demand original + true 1:1 viewing
-#                                 with an honest interpolated/original-pixel
-#                                 hint. The RAW/JPEG format switch that used to
-#                                 live here was withdrawn after user trials;
-#                                 the capture-variant badge is now plain text.
-EXPECTED_DIFFER="app.py
+# web/js/viewer.js                viewer: true 1:1 viewing plus source swapping
+#                                 that matches the pixels to the display size
+#                                 (2048 / 4096 / original, hysteretic and
+#                                 throttled) so magnification downsamples
+#                                 instead of interpolating, with an honest
+#                                 scale hint. The RAW/JPEG format switch that
+#                                 used to live here was withdrawn after user
+#                                 trials; the capture-variant badge is now
+#                                 plain text. Wheel zoom is now proportional to
+#                                 the scroll amount and the (trackpad vs. mouse)
+#                                 device, with the two sensitivities persisted in
+#                                 settings and the view buttons' active state
+#                                 synced.
+#                                 .gitignore: the preview-resolution investigation's
+#                                 raw measurements (11 JSON files) are kept, the
+#                                 per-item PNG renders are not -- they are
+#                                 regenerable output. Narrowing that path to JSON
+#                                 is why this file itself changed.
+EXPECTED_DIFFER=".gitignore
+app.py
 cullumi/__init__.py
 cullumi/analysis_worker.py
 cullumi/capture_variants.py
@@ -117,6 +157,7 @@ tests/test_scanner.py
 tests/test_settings_service.py
 web/css/base.css
 web/css/home.css
+web/css/settings.css
 web/css/viewer.css
 web/css/workspace.css
 web/index.html
@@ -133,6 +174,7 @@ web/js/viewer.js"
 # hand below. Anything else differing under web/ is still a violation.
 AUTHORIZED_WEB="web/css/base.css
 web/css/home.css
+web/css/settings.css
 web/css/viewer.css
 web/css/workspace.css
 web/index.html
@@ -192,6 +234,13 @@ models"
 #   the sidebar's arithmetic depends on. New tests for the withdrawal, the
 #   on-demand preview/1:1 work, and the counting basis live in the same file
 #   rather than a new one.
+#
+#   Third: the viewer's wheel zoom is now proportional to the scroll amount and
+#   to the input device (trackpad vs. mouse), so `ViewerWheelZoomTests` executes
+#   the real viewer.js through the existing Node harness to pin the calibration,
+#   the per-device sensitivities, the device heuristic, the manual override and
+#   the fit highlight. Several assertions are reverse proofs -- the harness
+#   export list had to grow to reach them.
 #
 # tests/test_media.py
 #   `open_image` returned a hardcoded "" for RAW, so `taken` was empty for every

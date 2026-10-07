@@ -1,0 +1,109 @@
+{
+  "screenshot": "/Users/inori95/Desktop/截屏2026-10-04 14.18.40.png",
+  "card_target": [
+    215,
+    161
+  ],
+  "comparisons": {
+    "PIL_LANCZOS": {
+      "ncc": 0.7768,
+      "xy": [
+        764,
+        177
+      ]
+    },
+    "PIL_BICUBIC": {
+      "ncc": 0.7806,
+      "xy": [
+        764,
+        177
+      ]
+    },
+    "PIL_BILINEAR": {
+      "ncc": 0.7884,
+      "xy": [
+        764,
+        177
+      ]
+    },
+    "PIL_BOX": {
+      "ncc": 0.7793,
+      "xy": [
+        764,
+        177
+      ]
+    },
+    "PIL_HAMMING": {
+      "ncc": 0.7833,
+      "xy": [
+        764,
+        177
+      ]
+    },
+    "PIL_NEAREST": {
+      "ncc": 0.7677,
+      "xy": [
+        764,
+        177
+      ]
+    }
+  },
+  "ranking": [
+    {
+      "name": "PIL_BILINEAR",
+      "ncc": 0.7884,
+      "xy": [
+        764,
+        177
+      ]
+    },
+    {
+      "name": "PIL_HAMMING",
+      "ncc": 0.7833,
+      "xy": [
+        764,
+        177
+      ]
+    },
+    {
+      "name": "PIL_BICUBIC",
+      "ncc": 0.7806,
+      "xy": [
+        764,
+        177
+      ]
+    },
+    {
+      "name": "PIL_BOX",
+      "ncc": 0.7793,
+      "xy": [
+        764,
+        177
+      ]
+    },
+    {
+      "name": "PIL_LANCZOS",
+      "ncc": 0.7768,
+      "xy": [
+        764,
+        177
+      ]
+    },
+    {
+      "name": "PIL_NEAREST",
+      "ncc": 0.7677,
+      "xy": [
+        764,
+        177
+      ]
+    }
+  ],
+  "best_match": {
+    "name": "PIL_BILINEAR",
+    "ncc": 0.7884,
+    "xy": [
+      764,
+      177
+    ]
+  }
+}

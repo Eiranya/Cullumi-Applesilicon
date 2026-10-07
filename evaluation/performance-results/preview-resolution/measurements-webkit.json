@@ -1,0 +1,149 @@
+{
+  "viewport": 1212,
+  "webkit": "/Users/inori95/Library/Caches/ms-playwright/webkit-2358/pw_run.sh",
+  "thumbFile": "/Users/inori95/Library/Application Support/Cullumi/projects/7d97e62d523c8ec6/thumbs/9b7ed8bba7a6991cc84e71bc5842bd5a8b4a80ab.jpg",
+  "geometry_dpr1": {
+    "cssBox": {
+      "w": 215.1875,
+      "h": 161.390625,
+      "x": 40,
+      "y": 0
+    },
+    "natural": {
+      "w": 512,
+      "h": 341
+    },
+    "devicePixelRatio": 1,
+    "imageRendering": "auto",
+    "columnWidth": "215.1875px",
+    "fractional": "fractional",
+    "oversample": 2.38
+  },
+  "dpr1": {
+    "devicePxNeeded": 215,
+    "oversample": 2.38,
+    "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/dpr1.png"
+  },
+  "dpr2": {
+    "devicePxNeeded": 430,
+    "oversample": 1.19,
+    "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/dpr2.png"
+  },
+  "image_rendering_default": {
+    "effective": "auto",
+    "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/ir-default.png"
+  },
+  "image_rendering_auto": {
+    "effective": "auto",
+    "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/ir-auto.png"
+  },
+  "image_rendering_high-quality": {
+    "effective": "auto",
+    "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/ir-high-quality.png"
+  },
+  "image_rendering_webkit-optimize-contrast": {
+    "effective": "crisp-edges",
+    "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/ir-webkit-optimize-contrast.png"
+  },
+  "image_rendering_pixelated": {
+    "effective": "pixelated",
+    "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/ir-pixelated.png"
+  },
+  "size_sweep_dpr": 2,
+  "size_sweep": {
+    "215": {
+      "natural": 215,
+      "devicePxNeeded": 430,
+      "oversample": 0.5,
+      "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/sz215@dpr2.png"
+    },
+    "216": {
+      "natural": 216,
+      "devicePxNeeded": 430,
+      "oversample": 0.5,
+      "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/sz216@dpr2.png"
+    },
+    "256": {
+      "natural": 256,
+      "devicePxNeeded": 430,
+      "oversample": 0.59,
+      "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/sz256@dpr2.png"
+    },
+    "341": {
+      "natural": 341,
+      "devicePxNeeded": 430,
+      "oversample": 0.79,
+      "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/sz341@dpr2.png"
+    },
+    "430": {
+      "natural": 430,
+      "devicePxNeeded": 430,
+      "oversample": 1,
+      "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/sz430@dpr2.png"
+    },
+    "512": {
+      "natural": 512,
+      "devicePxNeeded": 430,
+      "oversample": 1.19,
+      "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/sz512@dpr2.png"
+    }
+  },
+  "tight": {
+    "boxCssPx": [
+      215,
+      143
+    ],
+    "variants": {
+      "default@dpr1": {
+        "devicePx": [
+          215,
+          143
+        ],
+        "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/tight-irdefault@dpr1.png"
+      },
+      "default@dpr2": {
+        "devicePx": [
+          430,
+          286
+        ],
+        "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/tight-irdefault@dpr2.png"
+      },
+      "-webkit-optimize-contrast@dpr1": {
+        "devicePx": [
+          215,
+          143
+        ],
+        "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/tight-ir-webkit-optimize-contrast@dpr1.png"
+      },
+      "-webkit-optimize-contrast@dpr2": {
+        "devicePx": [
+          430,
+          286
+        ],
+        "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/tight-ir-webkit-optimize-contrast@dpr2.png"
+      }
+    }
+  },
+  "integer_vs_fractional": {
+    "int215": {
+      "cssWidth": 215,
+      "cssHeight": 143,
+      "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/box-int215.png"
+    },
+    "frac215_19": {
+      "cssWidth": 215.1875,
+      "cssHeight": 143,
+      "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/box-frac215_19.png"
+    },
+    "int216": {
+      "cssWidth": 216,
+      "cssHeight": 144,
+      "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/box-int216.png"
+    },
+    "frac215_5": {
+      "cssWidth": 215.5,
+      "cssHeight": 144,
+      "render": "/Users/inori95/WorkBuddy/编程任务/cullumi-macos/evaluation/performance-results/preview-resolution/renders/box-frac215_5.png"
+    }
+  }
+}
