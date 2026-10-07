@@ -5875,6 +5875,7 @@ class ViewerPagingProtectionQATests(unittest.TestCase):
   _releaseOk: () => globalThis.__release("ok"),
   _sleep: (ms) => globalThis.__realSleep(ms),
   _libraryLoading: () => state.library.loading,
+  _hintText: () => $("#viewerPaging").textContent,
 };
 module.exports = __exports;
 `;
@@ -6347,6 +6348,206 @@ module.exports = __exports;
         )
         self.assertEqual(result["items"], 6, result)
         self.assertEqual(result["spinner"], True, result)
+
+    def test_previous_from_the_first_photo_reaches_the_true_last_photo(self) -> None:
+        """Wrapping backwards must land on the library's last photo, not on
+        the last *loaded* one.
+
+        The backward branch used to be a plain ``openViewer(items.length - 1)``.
+        While the viewer could only ever hold one page that was also the end of
+        the library, so the two were one and the same; auto-paging pulled them
+        apart and left the readout claiming "120 / 500" while "previous" turned
+        around at 120.
+
+        Reverse proof: with the old one-liner this lands on index 119, not 479.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(120, 480, false);
+            state.viewerIndex = 0;
+            __viewer._nextAdded(120);
+            moveViewer(-1);                 // wrap -- must fetch the rest first
+            for (let i = 0; i < 6 && !state.library.done; i += 1) {
+              __viewer._releaseOk();
+              await __viewer._sleep(10);
+            }
+            console.log(JSON.stringify({
+              index: state.viewerIndex,
+              items: state.items.length,
+              done: state.library.done,
+              toasts: __viewer._toasts(),
+              indexText: __viewer._indexText(),
+            }));
+            """
+        )
+        self.assertTrue(result["done"], result)
+        self.assertEqual(result["items"], 480, result)
+        # 479 is the library's last photo; 119 is merely the last one loaded.
+        self.assertEqual(
+            result["index"], 479, f"回卷没有跳到真正的最后一张：{result}"
+        )
+        self.assertEqual(result["indexText"], "480 / 480", result)
+        self.assertEqual(result["toasts"], [], result)
+
+    def test_previous_wrap_stops_moving_the_viewer_once_it_closes(self) -> None:
+        """A wrap that is still fetching must not move a viewer that is gone.
+
+        The batches are still worth merging (scrolling benefits), so this is
+        only about the index: closing mid-wrap has to cancel the jump.
+
+        Reverse proof: without the token/open re-check the late batches would
+        teleport the viewer to the end after the user had already closed it.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(120, 480, false);
+            state.viewerIndex = 0;
+            __viewer._nextAdded(120);
+            moveViewer(-1);
+            __viewer._close();              // user closes while pages are coming
+            __viewer._releaseOk();
+            await __viewer._sleep(60);
+            console.log(JSON.stringify({
+              index: state.viewerIndex,
+              items: state.items.length,
+              spinner: __viewer._pagingHidden(),
+            }));
+            """
+        )
+        self.assertEqual(result["index"], 0, f"关闭后回卷仍移动了 viewer：{result}")
+        # The batch still merges: only the jump is cancelled.
+        self.assertEqual(result["items"], 240, result)
+        self.assertTrue(result["spinner"], result)
+
+    def test_previous_wrap_does_not_stack_a_second_loader(self) -> None:
+        """Wrapping while a forward continuation runs must not fire a second
+        request on top of it.
+
+        The paging lock is held by the continuation. Stacking would issue two
+        concurrent page fetches for one user action and let whichever lands
+        first decide where the viewer ends up.
+
+        Reverse proof: without the guard ``calls`` doubles and the wrap races
+        the continuation.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(1, 5, false);
+            state.viewerIndex = 0;
+            __viewer._nextAdded(2);
+            moveViewer(1);                  // forward continuation in flight
+            const callsBefore = __viewer._pageCalls();
+            moveViewer(-1);                 // wrap while it is still running
+            // Let a stacked wrap run to completion before looking. Counting
+            // requests is NOT enough to detect one: the real dedupe
+            // (gallery.js:237) refuses to start while loading, so a stacked
+            // wrap issues no request of its own. What it does do is run its
+            // own finally, which releases the lock the continuation is
+            // holding, and report a failure that never happened.
+            await __viewer._sleep(20);
+            const afterWrap = {
+              pending: state.viewerPendingAdvance,
+              index: state.viewerIndex,
+              calls: __viewer._pageCalls(),
+              lock: state.viewerPageLoading,
+              toasts: __viewer._toasts(),
+            };
+            __viewer._releaseOk();
+            await __viewer._sleep(80);
+            console.log(JSON.stringify({
+              callsBefore, afterWrap,
+              index: state.viewerIndex,
+              items: state.items.length,
+            }));
+            """
+        )
+        self.assertEqual(result["callsBefore"], 1, result)
+        self.assertEqual(
+            result["afterWrap"]["calls"], 1, f"回卷叠了第二个请求：{result}"
+        )
+        self.assertEqual(result["afterWrap"]["pending"], 0, result)
+        self.assertTrue(
+            result["afterWrap"]["lock"],
+            f"回卷偷走了续页持有的分页锁：{result}",
+        )
+        self.assertEqual(
+            result["afterWrap"]["toasts"],
+            [],
+            f"回卷在续页在途时谎报失败：{result}",
+        )
+        # The fallback is the last *loaded* photo -- never wrong, just shorter.
+        self.assertEqual(result["index"], 0, result)
+
+    def test_previous_wrap_says_so_when_it_could_not_reach_the_end(self) -> None:
+        """If the remaining batches never arrive, the jump is a partial one and
+        has to be labelled as such.
+
+        Silently landing on the last loaded photo would recreate the very lie
+        this change removes: the readout would show "120 / 480" and the user
+        would believe they were at the end of the library.
+
+        Reverse proof: dropping the toast leaves ``toasts`` empty while the
+        index still reads 119 -- indistinguishable from a successful wrap.
+        """
+        result = self.run_viewer(
+            """
+            // _seed resets __waitScale, so the shrink has to come after it.
+            __viewer._seed(120, 480, false);
+            __viewer._waitScale(0.01);      // shrink the internal waiting bound
+            state.viewerIndex = 0;
+            __viewer._hang(true);           // batches never settle
+            moveViewer(-1);
+            // The bound is 750 polls of wait(20ms); even scaled down, Node
+            // clamps setTimeout(0) to ~1ms, so this needs > 750ms to fire.
+            await __viewer._sleep(1500);
+            console.log(JSON.stringify({
+              index: state.viewerIndex,
+              toasts: __viewer._toasts(),
+              spinner: __viewer._pagingHidden(),
+            }));
+            """
+        )
+        self.assertEqual(result["index"], 119, result)
+        self.assertTrue(
+            result["toasts"], f"没取完却没有任何提示，又变成「120 / 480」的谎：{result}"
+        )
+        self.assertTrue(result["spinner"], result)
+
+    def test_viewer_paging_hint_returns_to_its_default_text(self) -> None:
+        """The wrap rewrites the paging hint; it must put the original back.
+
+        ``VIEWER_PAGING_HINT_DEFAULT`` duplicates the text in index.html, and
+        ``setViewerPagingIndicator`` only toggles ``hidden`` -- so a wrap that
+        forgot to restore would leave the forward path announcing a wrap.
+
+        Reverse proof: removing the restore leaves ``after`` as the wrap text.
+        """
+        result = self.run_viewer(
+            """
+            __viewer._seed(120, 240, false);
+            state.viewerIndex = 0;
+            __viewer._nextAdded(120);
+            moveViewer(-1);
+            const during = __viewer._hintText();
+            __viewer._releaseOk();
+            await __viewer._sleep(60);
+            console.log(JSON.stringify({
+              during, after: __viewer._hintText(),
+            }));
+            """
+        )
+        markup = (Path(__file__).parents[1] / "web" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        default = (
+            markup.split('id="viewerPaging"', 1)[1].split(">", 1)[1].split("<")[0]
+        )
+        self.assertNotEqual(result["during"], default, result)
+        self.assertEqual(
+            result["after"],
+            default,
+            f"回卷后提示文案没有还原成 index.html 的原文：{result}",
+        )
 
 
 class QuarantineProgressCacheQATests(unittest.TestCase):

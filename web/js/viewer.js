@@ -1359,6 +1359,83 @@ async function continueViewerPage(token) {
     setViewerPagingIndicator(false);
   }
 }
+// 「上一张」越过第一张时的回卷。
+//
+// v1.1.4 之前这里直接跳到 state.items.length - 1，也就是**已载入**的最后一张。
+// 在「只能翻 120 张」的年代那恰好就是库尾，两者是同一个东西；自动续页上线之后
+// 它们分家了：向前能一路翻到第 500 张，向后却只能在第 120 张掉头，而位置指示还
+// 写着「120 / 500」——自相矛盾。
+//
+// 因此这里先把剩余批次取完，再跳到**真正的**最后一张，与向前的语义对称。
+// 代价是回卷一次要取完剩下的全部（大库会等一会儿），这是用户明确选定的行为。
+//
+// 三条不能松的约束：
+//  1. 不叠加载器。已有续页在途时退回「已载入的最后一张」——那是旧行为，永远
+//     不会错，只是没那么远。
+//  2. 每一批之后都重核对代次与预览是否还开着。取页期间换筛选/关预览，就停在
+//     原地，绝不移动 viewerIndex。
+//  3. 没取完就跳，必须如实说明。否则「跳到已载入的最后一张」会被误当成库尾，
+//     又变回那个「120 / 500」的谎。
+const VIEWER_WRAP_MAX_PAGES = 500; // 60,000 张的余量；真正的兜底是「空批次即停」
+// 与 index.html 里 #viewerPaging 的初始文案一致。两处若走偏，续页时就会显示
+// 回卷的文案——test_viewer_paging_hint_returns_to_its_default 钉住这一点。
+const VIEWER_PAGING_HINT_DEFAULT = "正在加载下一批…";
+async function wrapViewerToLast(token) {
+  if (!state.items.length) return;
+  const jumpToLoadedEnd = () => {
+    setViewerPagingIndicator(false);
+    openViewer(state.items.length - 1);
+  };
+  // 续页在途（持着分页锁）或不在照片库视图 / 已经取完：都不必再取页。
+  if (state.viewerPageLoading || state.view !== "library" || state.library.done) {
+    jumpToLoadedEnd();
+    return;
+  }
+  state.viewerPageLoading = true;
+  const hint = $("#viewerPaging");
+  if (hint) hint.textContent = "正在载入剩余照片…";
+  setViewerPagingIndicator(true);
+  const generation = state.library.generation;
+  try {
+    for (
+      let page = 0;
+      page < VIEWER_WRAP_MAX_PAGES && !state.library.done;
+      page += 1
+    ) {
+      const before = state.items.length;
+      await awaitLibraryPage();
+      if (
+        token !== state.viewerPageToken ||
+        generation !== state.library.generation ||
+        !$("#viewer").open
+      ) {
+        return;
+      }
+      // 这一批没有带回新照片就停下来： gallery.js 在空批次时会把 done 置位，
+      // 所以走到这里基本只剩「这一批没等到」。继续循环只会重复同一个请求。
+      if (state.items.length === before) break;
+      if (hint && state.library.total)
+        hint.textContent = `正在载入剩余照片…（${state.items.length} / ${state.library.total}）`;
+    }
+    if (state.library.done) {
+      openViewer(state.items.length - 1);
+      return;
+    }
+    // 没取完。仍然跳到已载入的最后一张（响应比僵在原地好），但必须说清楚跳到
+    // 的不是库尾——否则又变成那个「120 / 500」的谎。
+    openViewer(state.items.length - 1);
+    toast(
+      `未能取完全部照片，已跳到已载入的最后一张（${state.items.length} / ${state.library.total || state.items.length}）`,
+    );
+  } catch (error) {
+    if (token === state.viewerPageToken)
+      toast(`加载更多照片失败：${error.message}`);
+  } finally {
+    state.viewerPageLoading = false;
+    if (hint) hint.textContent = VIEWER_PAGING_HINT_DEFAULT;
+    setViewerPagingIndicator(false);
+  }
+}
 function moveViewer(d) {
   const target = state.viewerIndex + d;
   if (target >= 0 && target < state.items.length) {
@@ -1370,12 +1447,13 @@ function moveViewer(d) {
     return;
   }
   if (d < 0) {
-    // 「上一张」在第一张时循环到最后一张：既有行为，用户已确认保留。
+    // 「上一张」越过第一张 = 回卷到最后一张。
     // 这里也必须清掉待前进计数（QA 缺陷 3）：回卷是一次真实的向后移动，
     // 残留的正向意图会在批次到货后把 viewer 反向拽走——方向与用户刚按的相反。
+    // 且必须清在「是否真的去取剩余批次」之前：否则续页在途时会漏清。
     state.viewerPendingAdvance = 0;
     setViewerPagingIndicator(false);
-    openViewer(state.items.length - 1);
+    wrapViewerToLast(state.viewerPageToken);
     return;
   }
   // d > 0 且已到已加载末尾。先记下这一次意图，再看要不要真的去续页。
