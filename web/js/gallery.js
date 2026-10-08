@@ -72,6 +72,18 @@ function setActiveNav(name) {
     button.classList.toggle("active", button.dataset.nav === name),
   );
 }
+// 各组别的默认排序。用户裁决：除「智能建议」外，其他组别一律默认按文件名排序
+// （direction 一律 asc），智能建议保留 suggestion。调用点只有两处，且都是
+// 「进入组别」的入口——nav 点击（applyLibraryPreset）与打开项目的初始组别
+// （session.js 的 showProject）。刻意**不**挂在 loadView 或筛选变化
+// （onFilterChange → libraryPresetName）上：那是组内操作，用户手动改的排序
+// 必须在组内存活，只有真正切组才重新落默认。
+function libraryGroupSortDefaults(name) {
+  return {
+    sort: name === "ai" ? "suggestion" : "filename",
+    direction: "asc",
+  };
+}
 function syncFilterControls() {
   libraryTools?.sync();
 }
@@ -159,6 +171,11 @@ function applyLibraryPreset(name) {
     ai: new Set(preset[1]),
     formats: new Set(state.filters.formats),
   };
+  // 进入组别即落该组的默认排序：手动改过的排序随切组作废，用户裁决如此。
+  // 放在 syncFilterControls 之前，工具栏的排序单选才能同步到新默认。
+  const sortDefaults = libraryGroupSortDefaults(name);
+  state.librarySort = sortDefaults.sort;
+  state.librarySortDirection = sortDefaults.direction;
   $("#searchInput").value = "";
   $("#searchInput").placeholder = "搜索照片";
   closeFilterMenus();

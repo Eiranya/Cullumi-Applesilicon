@@ -570,6 +570,14 @@ nav button.active em {
   padding:0 11px 11px
 }
 
+/* 两列网格是为照片卡「保留/移除」并排设计的（photoCard 模板，gallery.js）。
+   隔离历史批次的卡片只有一个「恢复此批次」按钮（renderBatches 模板），被压进
+   左半列导致五个字折行。only-child 时横跨整行；两按钮卡片不受影响。
+   若未来给某张单按钮卡片加了第二个按钮，此规则自动失效、回到并排布局。 */
+.card-actions button:only-child {
+  grid-column: 1 / -1
+}
+
 .card-actions .keep {
   color:var(--keep);
   background:var(--keep-soft);

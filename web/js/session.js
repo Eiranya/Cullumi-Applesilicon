@@ -161,8 +161,12 @@ async function showProject(p) {
     ai: new Set(AI_VALUES),
     formats: new Set((p.format_categories || []).map((item) => item.id)),
   };
-  state.librarySort = "suggestion";
-  state.librarySortDirection = "asc";
+  // 初始组别是照片库：排序默认落 filename（升序）。与 nav 点击共用同一份裁决
+  // （gallery.js 的 libraryGroupSortDefaults），两处口径分家的话，打开项目与
+  // 点一下「照片库」会看到两种默认排序。
+  const sortDefaults = libraryGroupSortDefaults("library");
+  state.librarySort = sortDefaults.sort;
+  state.librarySortDirection = sortDefaults.direction;
   state.similar = {
     groups: [],
     selectedId: "",

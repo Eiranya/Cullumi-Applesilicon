@@ -4,6 +4,7 @@ import copy
 import csv
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -2426,6 +2427,15 @@ class ViewerTierSwapTests(unittest.TestCase):
         getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
         parentElement: null,
         focus() {},
+        // openViewer → renderViewerPhoto → stopViewerMotion 无条件摸 <video> 的
+        // 这三个方法；openViewer 自己还需要 #viewer 的 showModal。都是空实现：
+        // 测试只关心 fit/换源，不关心媒体播放。
+        pause() {},
+        load() {},
+        removeAttribute() {},
+        open: false,
+        showModal() { this.open = true; },
+        close() { this.open = false; },
       };
     }
     const els = new Map();
@@ -2492,6 +2502,9 @@ class ViewerTierSwapTests(unittest.TestCase):
   resetViewerTransform, loadViewerOriginal,
   viewerShowingOriginal, viewerBitmapBelowSource, viewerOneToOneScale,
   syncViewerOriginalState, renderViewerZoomState,
+  // fit 布局与首载重排版（ViewerFitLayoutQATests）需要的一组出口。
+  viewerFitSize, viewerUnscaledSize, openViewer,
+  scheduleViewerDiag, reportViewerDiag, VIEWER_FIT_MAX_SCALE,
   viewerWheelPixels, viewerWheelDeviceKind,
   viewerWheelDevice, viewerWheelSensitivity, viewerWheelZoomFactor,
   resetViewerWheelSession, zoomViewer,
@@ -2816,18 +2829,25 @@ class ViewerTierSwapTests(unittest.TestCase):
         Every ``applyViewerTransform`` schedules a check, and zoom fires that
         hundreds of times. Even if the settle timer and the hysteresis both
         misfire, an unchanged tier must not produce a second request.
+
+        The fixture deliberately mounts a *stable* tier: a 2048px bitmap on a
+        1521px stage sits inside tier 1's supply, so nothing should move. (A
+        1024px bitmap can no longer be stable here -- since the fit cap rose
+        to 2x, it is displayed at ~1519px and *should* upgrade; that upgrade
+        is covered by the fit-layout tests, not this one.)
         """
         result = self.run_viewer(
             """
             const v = __viewer;
             const st = v._state;
             st.items = [{ id: 7, width: 7008, height: 4672, photo_url: "/p",
-                          preview_url: "/p&w=1024" }];
+                          preview_url: "/p&w=2048" }];
             const img = document.querySelector("#viewerImage");
-            img._attrs.src = "/p&w=1024";
-            img.offsetWidth = 1024; img.naturalWidth = 1024; img.naturalHeight = 683;
+            img._attrs.src = "/p&w=2048";
+            img.offsetWidth = 1521; img.naturalWidth = 2048; img.naturalHeight = 1365;
+            st.viewerTier = 1;
             v._resetProbes();
-            st.viewerTransform.scale = 1.0;    // needed = 1024 = 首屏档，无需换源
+            st.viewerTransform.scale = 1.0;    // needed = 1521 ≤ 2048，档位稳定
             for (let i = 0; i < 50; i++) v.syncViewerTier();
             console.log(JSON.stringify({probes: v._probeCount()}));
             """
@@ -3415,12 +3435,20 @@ class ViewerWheelZoomTests(unittest.TestCase):
             st.viewerTransform.scale = 1;
             v.renderViewerZoomState();
             const atFit = active();
-            // A photo smaller than the stage IS 1:1 at scale 1 -> 适应 not lit.
-            img.naturalWidth = 1000; img.naturalHeight = 667; img.offsetWidth = 1000;
+            // A photo that IS 1:1 at scale 1 -> 适应 not lit. Since the fit cap
+            // rose to 2x, a photo *smaller* than the stage is upscaled at scale
+            // 1 and is no longer 1:1 -- so this case now needs a bitmap that
+            // exactly fills the box (k == 1), the only shape that still lands
+            // on 1:1 at scale 1.
+            img.parentElement.clientWidth = 1200;
+            img.parentElement.clientHeight = 800;
+            img.naturalWidth = 1200; img.naturalHeight = 800; img.offsetWidth = 1200;
             st.viewerTransform.scale = 1;
             v.renderViewerZoomState();
             const atOneToOne = active();
             // Zoomed to an intermediate倍率: 适应 is not the current state.
+            img.parentElement.clientWidth = 1521;
+            img.parentElement.clientHeight = 1013;
             img.naturalWidth = 4000; img.naturalHeight = 2667; img.offsetWidth = 1520;
             st.viewerTransform.scale = 3;
             v.renderViewerZoomState();
@@ -7451,6 +7479,468 @@ class RestoreProgressFrontendQATests(unittest.TestCase):
         )
         self.assertEqual(result["refreshed"], 1, result)
         self.assertEqual(result["views"], 1, result)
+
+
+class ViewerFitLayoutQATests(unittest.TestCase):
+    """预览窗「没占满」两个症状的修复：fit 放行放大（封顶 2×）+ 首载重排版。
+
+    症状 1a（所有图差一点）：fit 曾封顶 1（永不放大），位图停留在 CSS max-* 的
+    旧上限上（比真实媒体框小 86~145px）。症状 1b（有些图特别小）：换档链没走完
+    的照片位图停在 1024 档，k ≤ 1 使它只显示 1024 宽（框约 1470）。
+
+    修复是两件事：viewerFitSize 的 k 上限提到 2（用户裁决「放大但封顶 2×」，
+    400px 级小图仍不满窗是接受的折中），以及在 openViewer 的 settled（首张位图
+    落地）里重跑 applyViewerTransform——此前 renderViewerPhoto 里的重排版跑在
+    img.src 赋值之前，算的是**上一张**照片的 naturalWidth，之后没有任何东西重算。
+    """
+
+    SCRIPT = ViewerTierSwapTests.SCRIPT
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.node = shutil.which("node")
+        if not cls.node:
+            raise unittest.SkipTest("需要 node 才能执行 viewer.js 的 fit 布局逻辑")
+        cls.web = Path(__file__).parents[1] / "web" / "js" / "viewer.js"
+        cls.harness = Path(tempfile.mkdtemp()) / "fit-harness.js"
+        cls.harness.write_text(cls.SCRIPT, encoding="utf-8")
+
+    def run_viewer(self, body: str) -> dict[str, Any]:
+        """Execute ``body`` with ``__viewer`` in scope; return its JSON result."""
+        script = f"require({str(self.harness)!r});\n{body}\n"
+        completed = subprocess.run(
+            [self.node, "-e", script, str(self.web)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if completed.returncode != 0:
+            self.fail(f"harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_fit_size_upscales_small_bitmaps_capped_at_two(self) -> None:
+        """k 上限 1 → 2：小位图放大铺满，大位图仍由媒体框约束。
+
+        反向证明：三条期望互不相同——封顶改回 1 则小图用例红；封顶改成
+        Infinity（不封顶）则 400px 小图用例红；整段删掉放大逻辑则 1024 档用例红。
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const img = document.querySelector("#viewerImage");
+            // 媒体框：3440px 宽窗口下的真实可用区（1521 × 1013），非整数是为了
+            // 别让断言靠凑整蒙混。
+            img.parentElement.clientWidth = 1521;
+            img.parentElement.clientHeight = 1013;
+            const fit = (w, h) => {
+              img.naturalWidth = w; img.naturalHeight = h;
+              return v.viewerFitSize(img);
+            };
+            const small = fit(400, 300);    // 400px 小图：最多放到 2 倍
+            const mid = fit(1024, 683);     // 1024 档位图：恰好放大铺满
+            const large = fit(7008, 4672);  // 大图：照旧由框约束（缩小）
+            const cap = fit(100, 50);       // 上限确实是 2，不是「无上限」
+            console.log(JSON.stringify({small, mid, large, cap,
+                                        maxScale: v.VIEWER_FIT_MAX_SCALE}));
+            """
+        )
+        self.assertEqual(result["maxScale"], 2)
+        # 400px 小图：2 倍封顶 → 800 × 600（用户接受它不满窗）
+        self.assertEqual(result["small"]["w"], 800)
+        self.assertEqual(result["small"]["h"], 600)
+        # 1024 档位图在 1521 框里：受高度约束放大 1013/683 ≈ 1.483 倍铺满。
+        # 这是「特别小」症状的直接解药——旧实现这里返回 1024 × 683。
+        self.assertAlmostEqual(result["mid"]["w"], 1024 * 1013 / 683, places=6)
+        self.assertAlmostEqual(result["mid"]["h"], 1013, places=6)
+        self.assertGreater(result["mid"]["w"], 1024, "1024 档位图没有被放大铺满")
+        # 大图行为不变：仍缩小到框内（高度约束），与旧实现逐位一致。
+        self.assertAlmostEqual(result["large"]["h"], 1013, places=6)
+        self.assertAlmostEqual(result["large"]["w"], 7008 * 1013 / 4672, places=6)
+        self.assertLess(result["large"]["w"], 1521)
+        # 封顶生效：100px 位图最多 200px，而不是被拉到框宽 380px。
+        self.assertEqual(result["cap"]["w"], 200)
+
+    def test_first_bitmap_landing_relayouts_to_the_new_fit(self) -> None:
+        """首张位图落地后必须重排版，不能停留在上一张的旧布局上。
+
+        复现「上一张是竖图、当前是横图」的切换：renderViewerPhoto 里的重排版跑在
+        img.src 赋值之前，naturalWidth 还是竖图的 800×1200。修复后 settled（load
+        事件）要按新位图（1024×683）重写 width/height。反向证明：把 settled 里的
+        applyViewerTransform 删掉，afterLoad 与 afterRender 逐位相同，断言即红。
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            // renderViewerPhoto 会渲染变体徽章与 meta 行，两个桩即可。
+            global.variantFormatText = () => "";
+            global.formatSize = (n) => `${n}B`;
+            st.items = [{ id: 9, width: 1600, height: 900,
+                          relative_path: "trip/IMG_0009.JPG",
+                          media_type: "image", size: 1,
+                          photo_url: "/q", preview_url: "/q&w=1024" }];
+            const img = document.querySelector("#viewerImage");
+            // 上一张是竖图：残留位图与按它算出的旧布局（height 先到框底）。
+            img.naturalWidth = 800; img.naturalHeight = 1200;
+            img.offsetWidth = 675; img.offsetHeight = 1013;
+            img._attrs.src = "/old";
+            v.resetViewerTransform();
+            const px = (s) => parseFloat(s) || 0;
+            const stale = { w: px(img.style.width), h: px(img.style.height) };
+            // 打开新照片。complete=false 模拟真实浏览器在 renderViewerPhoto 之后、
+            // load 事件之前的状态：src 已指向新图、位图尚未解码。
+            img.complete = false;
+            v.openViewer(0);
+            const afterRender = { w: px(img.style.width), h: px(img.style.height) };
+            // 新位图落地（1024 档横图）→ settled 必须按新 natural 重排版。
+            img.naturalWidth = 1024; img.naturalHeight = 683;
+            v._fireElement("viewerImage", "load");
+            const afterLoad = { w: px(img.style.width), h: px(img.style.height),
+                                scale: st.viewerTransform.scale };
+            console.log(JSON.stringify({stale, afterRender, afterLoad}));
+            """
+        )
+        expected_w = 1024 * 1013 / 683  # 高度先约束：k = 1013/683 ≈ 1.483
+        self.assertAlmostEqual(result["stale"]["w"], 800 * 1013 / 1200, places=6,
+                               msg="前置条件不成立：旧布局不是竖图的 fit")
+        # 修复点：load 之后 width/height 被重写为**新**位图的 fit，
+        # 而不是沿用 renderViewerPhoto 时按旧位图算出的尺寸。
+        self.assertAlmostEqual(result["afterLoad"]["w"], expected_w, places=6)
+        self.assertAlmostEqual(result["afterLoad"]["h"], 1013, places=6)
+        self.assertNotEqual(
+            result["afterLoad"]["w"], result["afterRender"]["w"],
+            "位图落地后没有重排版，仍停留在上一张照片的布局上",
+        )
+        # 整幅显示语义：scale 仍为 1（放大是 fit 的事，不是 transform 的事）。
+        self.assertEqual(result["afterLoad"]["scale"], 1)
+
+    def test_the_tier_guard_skips_wasteful_mid_tiers_for_small_sources(self) -> None:
+        """源宽 ≤ 目标档宽时直接跳原图档，不发中间档的无效请求。
+
+        一张 1200px 的源图：needed 超过 2048 后，旧逻辑会先请求 4096——而
+        服务端对 1200px 的源根本产不出比原图更多的像素，拿回来还是那一张。
+        反向证明：删掉 syncViewerTier 里的守卫，pending 落在 2（4096）、probe
+        的 URL 带 w=4096，两条断言同时红。
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            st.items = [{ id: 5, width: 1200, height: 800,
+                          photo_url: "/p", preview_url: "/p&w=1024" }];
+            const img = document.querySelector("#viewerImage");
+            img._attrs.src = "/p&w=1024";
+            img.naturalWidth = 1024; img.naturalHeight = 683;
+            img.parentElement.clientWidth = 1521;
+            img.parentElement.clientHeight = 1013;
+            v._resetProbes();
+            st.viewerTransform.scale = 2.2;   // needed ≈ 3341 > 2048
+            v.syncViewerTier();
+            const first = { pending: st.viewerTierPending, src: v._probeSrc(0) };
+            // 在途时再触发检查，不得并发第二个请求。
+            v.syncViewerTier();
+            console.log(JSON.stringify({probes: v._probeCount(), first}));
+            """
+        )
+        self.assertEqual(result["probes"], 1, "中间档/重复请求未被守卫挡下")
+        self.assertEqual(result["first"]["pending"], 3, "应直接请求原图档")
+        self.assertEqual(
+            result["first"]["src"], "/p",
+            "原图档的 URL 不得带 w=，否则拿到的仍是重编码",
+        )
+
+    def test_a_stretched_bitmap_is_never_declared_one_to_one(self) -> None:
+        """位图被拉伸铺满时，1:1 判定必须直接判否——前缀诚实也救不回来。
+
+        fit 放行放大后，1024 档位图在 1520px 框里 scale=1 就已被拉伸：它的
+        「位图 1:1 点」落在 scale < 1 的不可达区。此时 viewerOneToOneScale 会把
+        1:1 点夹到 1，若 viewerIsOneToOne 不做可达性守卫就会宣称 1:1（哪怕提示
+        加上「非原图」前缀，也仍是在描述一种不存在的对齐）。反向证明分两层：
+        原图在真实 1:1 点、预览档在它自己的 1:1 点都必须仍判真——否则一个
+        「永远返回 false」的谓词也能蒙混前半段。
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            st.items = [{ id: 7, width: 7008, height: 4672, photo_url: "/p",
+                          preview_url: "/p&w=2048" }];
+            const img = document.querySelector("#viewerImage");
+            img.parentElement.clientWidth = 1521;
+            img.parentElement.clientHeight = 1013;
+            const set = (w, h, scale) => {
+              img.naturalWidth = w; img.naturalHeight = h;
+              img.offsetWidth = 1521; img.offsetHeight = 1013;
+              st.viewerTransform.scale = scale;
+            };
+            // 1024 档位图被拉伸铺满（scale=1 即已放大 1.48 倍）。
+            set(1024, 683, 1);
+            const stretched = v.viewerIsOneToOne();
+            v.renderViewerScaleHint();
+            const stretchedHint = document.querySelector("#viewerScaleHint").textContent;
+            // 原图落在真实 1:1 点（7008px 源在 1520px 框里约 4.61 倍）。
+            // 注意先设尺寸再取 1:1 倍率——参数求值顺序不能反。
+            img.naturalWidth = 7008; img.naturalHeight = 4672;
+            st.viewerTransform.scale = v.viewerOneToOneScale();
+            const originalOneToOne = v.viewerIsOneToOne();
+            // 2048 预览档落在它自己的 1:1 点：位图没被拉伸，此时「非原图 1:1」
+            // 是一句诚实的话（一个位图像素对一个屏幕像素）。
+            img.naturalWidth = 2048; img.naturalHeight = 1365;
+            st.viewerTransform.scale = v.viewerOneToOneScale();
+            const previewOneToOne = v.viewerIsOneToOne();
+            console.log(JSON.stringify({stretched, stretchedHint,
+                                        originalOneToOne, previewOneToOne}));
+            """
+        )
+        self.assertFalse(
+            result["stretched"], "拉伸的位图被宣称 1:1"
+        )
+        self.assertNotIn("1:1", result["stretchedHint"])
+        self.assertIn("放大显示", result["stretchedHint"])
+        self.assertTrue(result["originalOneToOne"], "原图 1:1 点被误判否")
+        self.assertTrue(result["previewOneToOne"], "预览档自身 1:1 点被误判否")
+
+    def test_the_diagnostic_reports_the_media_box_and_written_size(self) -> None:
+        """诊断补字段：媒体框尺寸 + 最终写入的布局尺寸。
+
+        为「用户之后仍报不满窗」留证据：box 是 fit 链路的输入端（.viewer-media
+        的真实可用区），written 是输出端（applyViewerTransform 写进 width/height
+        的值）。两者一对照，就能分辨「框量错了」还是「链路没走到」。既有字段
+        （bitmap/layout/scale/tier…）原样保留。
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            global.__diag = null;
+            global.json = async (path, body) => { global.__diag = body; return {}; };
+            st.items = [{ id: 7, width: 7008, height: 4672,
+                          relative_path: "trip/IMG_0007.JPG",
+                          media_type: "image", photo_url: "/p",
+                          preview_url: "/p&w=2048" }];
+            const img = document.querySelector("#viewerImage");
+            img.offsetWidth = 1521; img.offsetHeight = 1013;
+            img.naturalWidth = 7008; img.naturalHeight = 4672;
+            img._attrs.src = "/p";
+            st.viewerTransform.scale = 1;
+            v.applyViewerTransform();
+            v.reportViewerDiag().then(() => console.log(JSON.stringify({
+                diag: global.__diag,
+                expectedFitW: 7008 * Math.min(1521 / 7008, 1013 / 4672, 2),
+            })));
+            """
+        )
+        diag = result["diag"]
+        # 既有字段兼容：一个都不能少。
+        for key in ("photo", "source", "bitmap", "layout", "scale", "tier", "hint"):
+            self.assertIn(key, diag)
+        self.assertEqual(diag["bitmap"], "7008x4672")
+        self.assertEqual(diag["tier"], 0)
+        # 新字段：媒体框输入端与布局输出端。
+        self.assertEqual(diag["box"], "1521x1013")
+        self.assertAlmostEqual(
+            float(re.findall(r"[\d.]+", diag["written"])[0]),
+            result["expectedFitW"], places=6,
+        )
+
+
+class CardActionsOnlyChildTests(unittest.TestCase):
+    """「恢复此批次」按钮折行修复的契约。
+
+    .card-actions 的两列网格是为照片卡的「保留/移除」并排设计的；隔离历史批次
+    卡只有一个按钮，被压进左半列导致五个字折行。修复是 base.css 的 only-child
+    跨列规则。grid 布局本身在 Node 里测不了，这里钉两层契约：
+    ① 规则真实存在于 base.css 且写的是跨整行（1 / -1）；
+    ② 使用点枚举——gallery.js 里 card-actions 只有两种形态（双按钮照片卡 /
+      单按钮批次卡），only-child 只会命中后者。若有人给批次卡加了第二个
+      按钮，枚举即红，提醒他跨列规则从此不再命中。
+    """
+
+    WEB = Path(__file__).parents[1] / "web"
+
+    def test_the_only_child_rule_is_declared_in_base_css(self) -> None:
+        css = (self.WEB / "css" / "base.css").read_text(encoding="utf-8")
+        self.assertIn(".card-actions button:only-child", css)
+        self.assertRegex(
+            css,
+            r"\.card-actions button:only-child\s*\{[^}]*grid-column:\s*1\s*/\s*-1",
+        )
+
+    def test_card_actions_usage_points_stay_enumerable(self) -> None:
+        source = (self.WEB / "js" / "gallery.js").read_text(encoding="utf-8")
+        blocks = re.findall(r'class="card-actions">(.*?)</div>', source)
+        self.assertEqual(len(blocks), 2, f"card-actions 使用点数量变了：{blocks}")
+        button_counts = [block.count("<button") for block in blocks]
+        # 照片卡（photoCard 模板）：保留 + 移除，双按钮，跨列规则不得命中它。
+        self.assertEqual(button_counts[0], 2, "照片卡应是「保留/移除」双按钮")
+        # 隔离历史批次卡（renderBatches 模板）：仅「恢复此批次」，
+        # 唯一应被 only-child 跨列的形态。
+        self.assertEqual(button_counts[1], 1, "批次卡应是单按钮（恢复此批次）")
+        self.assertIn("恢复此批次", blocks[1])
+
+
+class LibraryNavSortDefaultQATests(unittest.TestCase):
+    """nav 切组必须重新落该组的默认排序。
+
+    用户裁决：除「智能建议」外，其他组别一律默认按文件名（filename）升序，
+    智能建议保留 suggestion。落默认的入口是 nav 点击（applyLibraryPreset），
+    不是 loadView——否则组内手动改的排序会被重渲染悄悄改回默认。
+    """
+
+    SCRIPT = """
+    const fs = require("fs");
+    const source = fs.readFileSync(process.env.QA_GALLERY, "utf8");
+    function makeEl(id) {
+      return {
+        id, value: "", placeholder: "", dataset: {}, style: {},
+        classList: {
+          _s: new Set(),
+          add(...c) { c.forEach((x) => this._s.add(x)); },
+          remove(...c) { c.forEach((x) => this._s.delete(x)); },
+          contains(c) { return this._s.has(c); },
+          toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); },
+        },
+        _text: "",
+        set textContent(v) { this._text = String(v ?? ""); },
+        get textContent() { return this._text; },
+      };
+    }
+    const els = new Map();
+    const $ = (sel) => {
+      const id = sel.replace(/^#/, "");
+      if (!els.has(id)) els.set(id, makeEl(id));
+      return els.get(id);
+    };
+    global.$ = $;
+    global.$$ = () => [];
+    global.window = {};
+    global.document = { querySelector: $ };
+    // closeFilterMenus 定义在 settings.js，gallery.js 只调用；本用例不关心菜单。
+    global.closeFilterMenus = () => {};
+    // applyLibraryPreset 的 preset 表引用 runtime.js 的两个常量，补齐。
+    global.DECISION_VALUES = ["undecided", "keep", "remove"];
+    global.AI_VALUES = ["remove", "review", "no_suggestion"];
+    global.state = {
+      project: { id: "p1" }, view: "library", activeNav: "library",
+      items: [], settings: {}, similar: {}, library: { loading: false },
+      filters: { decisions: new Set(), ai: new Set(), formats: new Set() },
+      librarySort: "suggestion", librarySortDirection: "desc",
+    };
+    global.__views = 0;
+    const src = source + `
+;module.exports = { applyLibraryPreset, libraryGroupSortDefaults };
+;loadView = async () => { global.__views += 1; };
+`;
+    const module_ = { exports: {} };
+    new Function("module", "exports", "require", src)(
+      module_, module_.exports, require,
+    );
+    global.__gallery = module_.exports;
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.node = shutil.which("node")
+        if not cls.node:
+            raise unittest.SkipTest("需要 node 才能执行 gallery.js 的组别默认排序逻辑")
+        cls.web = Path(__file__).parents[1] / "web" / "js" / "gallery.js"
+        cls.harness = Path(tempfile.mkdtemp()) / "qa-nav-sort-harness.js"
+        cls.harness.write_text(cls.SCRIPT, encoding="utf-8")
+
+    def run_gallery(self, body: str) -> dict[str, Any]:
+        script = f"require({str(self.harness)!r});\n{body}\n"
+        completed = subprocess.run(
+            [self.node, "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "QA_GALLERY": str(self.web)},
+        )
+        if completed.returncode != 0:
+            self.fail(f"node 执行失败：\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_switching_groups_lands_each_group_default_and_relands_on_return(
+        self,
+    ) -> None:
+        """切组落默认、组内手改存活、切回再落默认——三条裁决一起钉。
+
+        反向证明：删掉 applyLibraryPreset 里的落默认两行，keep.sort 停在初始的
+        suggestion，第一组断言即红；把 ai 也落成 filename 则第二组红。
+        """
+        result = self.run_gallery(
+            """
+            const g = __gallery;
+            const r = {};
+            g.applyLibraryPreset("keep");
+            r.keep = { sort: state.librarySort,
+                       dir: state.librarySortDirection,
+                       nav: state.activeNav };
+            g.applyLibraryPreset("ai");
+            r.ai = { sort: state.librarySort, dir: state.librarySortDirection };
+            // 组内手动改排序仍然有效：改的是同一个 state（工具栏 onSortChange
+            // 只负责带着它走 loadView），切组之前没人动它。
+            state.librarySort = "size";
+            r.manual = state.librarySort;
+            // 切到别的组 → 落该组默认；切回 keep → 重新落 filename。
+            g.applyLibraryPreset("undecided");
+            r.undecided = state.librarySort;
+            g.applyLibraryPreset("remove");
+            r.remove = state.librarySort;
+            g.applyLibraryPreset("library");
+            r.library = state.librarySort;
+            g.applyLibraryPreset("keep");
+            r.keepAgain = state.librarySort;
+            r.views = global.__views;
+            console.log(JSON.stringify(r));
+            """
+        )
+        self.assertEqual(
+            result["keep"],
+            {"sort": "filename", "dir": "asc", "nav": "keep"},
+            "进入「已保留」应落 filename/asc",
+        )
+        self.assertEqual(
+            result["ai"],
+            {"sort": "suggestion", "dir": "asc"},
+            "「智能建议」是唯一保留 suggestion 默认的组别",
+        )
+        self.assertEqual(result["manual"], "size", "组内手动改排序必须存活")
+        self.assertEqual(result["undecided"], "filename")
+        self.assertEqual(result["remove"], "filename")
+        self.assertEqual(result["library"], "filename")
+        self.assertEqual(
+            result["keepAgain"], "filename",
+            "切走再切回必须重新落默认，手动改的 size 不能残留",
+        )
+        self.assertEqual(result["views"], 6, "每次切组都应触发一次 loadView")
+
+
+class GroupSortDefaultSourcePins(unittest.TestCase):
+    """初始默认排序的源码钉：runtime.js 初值与 session.js 打开项目时的落点。
+
+    行为测试（LibraryNavSortDefaultQATests）覆盖 nav 点击路径；这两处是同一份
+    裁决的另外两个落点，值得静态钉住：runtime.js 的初值若退回 suggestion，
+    任何在 showProject 之前渲染的排序控件都会先亮错默认；session.js 若绕开
+    libraryGroupSortDefaults 自己写死，两处口径就会分家。
+    """
+
+    JS = Path(__file__).parents[1] / "web" / "js"
+
+    def test_runtime_initial_sort_is_filename(self) -> None:
+        source = (self.JS / "runtime.js").read_text(encoding="utf-8")
+        self.assertIn('librarySort: "filename"', source)
+
+    def test_similar_sort_is_out_of_scope_and_untouched(self) -> None:
+        source = (self.JS / "runtime.js").read_text(encoding="utf-8")
+        # 相似连拍视图的 similar.sort: "suggestion" 不在本次裁决范围，必须原样。
+        self.assertIn('sort: "suggestion"', source)
+
+    def test_show_project_lands_the_shared_default(self) -> None:
+        source = (self.JS / "session.js").read_text(encoding="utf-8")
+        self.assertIn('libraryGroupSortDefaults("library")', source)
+        # 旧写法不得残留：直接写死 "suggestion" 就是两处口径分家的开始。
+        self.assertNotIn('state.librarySort = "suggestion"', source)
 
 
 if __name__ == "__main__":

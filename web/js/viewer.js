@@ -87,6 +87,12 @@ const VIEWER_TIER_FAILED = new Set();
 // CSS `.viewer img` 的 max-width / max-height 留白，作为拿不到容器尺寸时的退路。
 const VIEWER_FIT_INSET_W = 170;
 const VIEWER_FIT_INSET_H = 145;
+// 适应窗口的放大上限。用户裁决：小位图允许放大**铺满**媒体框，但最多 2 倍。
+// 必须封顶的原因：400px 级的小图放大 3.8 倍虽然能填满 1521px 的框，但插值损失
+// 肉眼可见（马赛克上屏）；封顶 2× 之后这类图仍不满窗，是「尽量铺满」与「不把
+// 插值痕迹拉上屏幕」之间用户选定的折中。1024 档位图在 ~1520px 的框里则恰好
+// 放大 1.48 倍铺满——这正是「有些图特别小」症状的解药。
+const VIEWER_FIT_MAX_SCALE = 2;
 // 位图在 scale=1 时应占据的 CSS 尺寸（「适应窗口」的尺寸）。
 //
 // 这是缩放的基准。之所以要自己算而不是读 offsetWidth：缩放现在写进 width/height，
@@ -100,7 +106,14 @@ function viewerFitSize(target) {
       Math.max(1, (window.innerWidth || 0) - VIEWER_FIT_INSET_W),
     maxH = (box && box.clientHeight) ||
       Math.max(1, (window.innerHeight || 0) - VIEWER_FIT_INSET_H);
-  const k = Math.min(maxW / natural, maxH / naturalHeight, 1);
+  // k 曾封顶 1（永不放大）。那时凡是换档链没走完的照片都停留在 CSS max-* 的旧
+  // 上限上（比真实媒体框小 86~145px），而落在 1024 档的位图更是只显示 1024 宽
+  // ——「差一点不满窗」和「特别小」都源于此。现在放行到 VIEWER_FIT_MAX_SCALE。
+  const k = Math.min(
+    maxW / natural,
+    maxH / naturalHeight,
+    VIEWER_FIT_MAX_SCALE,
+  );
   return { w: natural * k, h: naturalHeight * k };
 }
 // 当前呈现对象在 scale=1 时的尺寸。动图用的 <video> 由 CSS 撑满媒体框、没有
@@ -205,6 +218,12 @@ function viewerTierLabel(tier) {
 // 若位图比视口小（offsetWidth >= naturalWidth），1:1 就是 scale=1。DPR>1 的屏幕上
 // CSS 像素本身就小于设备像素，这是显示器的物理约束，与「是否插值」无关，故不参与
 // 该比值。
+//
+// fit 可大于 natural 之后（VIEWER_FIT_MAX_SCALE 放行小位图放大铺满），base.w 可能
+// 超过 naturalWidth，natural/base.w 会小于 1——真正的 1:1 点落在了 scale 的可达
+// 范围（scale ≥ 1）之外。这里仍取 max(1, ·)：返回值是「缩放倍率」而非诊断值，
+// 夹到 1 表示「1:1 不可达，最近可达点是整幅显示」；而「此刻是否真在 1:1」的判断
+// 不归这个函数，归 viewerIsOneToOne 里的可达性守卫——两处口径合起来才诚实。
 function viewerOneToOneScale() {
   const target = viewerTransformTarget();
   const natural = target.naturalWidth || 0,
@@ -226,6 +245,14 @@ function viewerIsOneToOne() {
   const oneToOne = viewerOneToOneScale(),
     scale = state.viewerTransform.scale;
   if (!viewerHasPixels()) return false;
+  // 可达性守卫：位图在 scale=1 就被拉伸（fit.w > naturalWidth）时，任何 scale ≥ 1
+  // 的呈现都在插值——1:1 点已落在可达范围之外。此时不管 scale 是多少都必须判否，
+  // 否则提示会在「非原图 1:1」「已 1:1」两个说法里挑一个撒谎：拉伸位图的 1:1
+  // 根本不存在，前缀换成了也一样。误报成本实测过：放大一张 1024 档位图铺满
+  // 1520px 框时，旧逻辑会宣称「已 1:1」。
+  const base = viewerUnscaledSize(),
+    natural = viewerTransformTarget().naturalWidth || 0;
+  if (natural && base.w > natural * 1.001) return false;
   return Math.abs(scale - oneToOne) <= oneToOne * 0.001;
 }
 // 位图是否已经解码出尺寸。没有它时不能对「是否 1:1」下结论——那会让提示在图片
@@ -349,7 +376,13 @@ function renderViewerScaleHint() {
     hint.classList.add("viewer-scale-hint-exact");
     return;
   }
-  hint.textContent = `整幅显示 · ${size}${awaiting}`;
+  // 「整幅显示」的诚实性前提是降采样（每屏幕像素含多于一个源像素）。fit 可大于
+  // natural 之后，scale=1 也可能是在拉伸位图——再说「整幅显示」会让人以为没有
+  // 插值。这个状态只出现在两个地方：换源升档前的短暂窗口（needed 一超就会触发
+  // 升档），以及「查看原图」自动落位后的小源图（那条路已被上面「已到原始像素
+  // 上限」接走）。如实改称「放大显示」。复用上面取好的 bitmapWidth。
+  const stretched = bitmapWidth > 0 && viewerUnscaledSize().w > bitmapWidth * 1.001;
+  hint.textContent = `${stretched ? "放大显示" : "整幅显示"} · ${size}${awaiting}`;
 }
 // 诊断上报：把浏览器此刻的真实测量值写到 cullumi.log。
 //
@@ -393,6 +426,14 @@ async function reportViewerDiag() {
     tier: state.viewerTier,
     tier_pending: state.viewerTierPending,
     tier_failed: [...VIEWER_TIER_FAILED],
+    // 媒体框（.viewer-media）的真实可用尺寸。不满窗投诉的定位靠它：若 written
+    // 明显小于 box，说明 fit 链路没走到（位图没落地 / 旧布局残留）。
+    box: (() => {
+      const box = img.parentElement;
+      return `${(box && box.clientWidth) || 0}x${(box && box.clientHeight) || 0}`;
+    })(),
+    // applyViewerTransform 最终写进 width/height 的布局尺寸（fit 链路的输出端）。
+    written: `${img.style.width || ""}x${img.style.height || ""}`,
     // 界面上给用户看的那句话，原样带走
     hint: $("#viewerScaleHint").textContent,
     src: (img.getAttribute("src") || "").split("&token=")[0].split("&w=").pop(),
@@ -446,6 +487,14 @@ function applyViewerTransform() {
       //    程度后图片被拉宽」。封顶在 naturalWidth 处，布局尺寸永远不会失控。
       // ② 1:1 以内必须用布局尺寸，浏览器才会按显示尺寸重新栅格化（这是放大后
       //    不糊的前提）；1:1 以外本就是在放大不存在的像素，用什么方式都一样。
+      //
+      // fit 可大于 natural 之后（VIEWER_FIT_MAX_SCALE），封顶的准确含义变为：
+      // oneToOne = max(1, natural/fit.w)。fit ≤ natural 时它就是真实 1:1 倍率，
+      // 布局最大到 naturalWidth；fit > natural（小位图放大铺满）时 natural/fit.w
+      // < 1，max(1,·) 把封顶点压回 1 → layoutScale = min(scale, 1) = 1，布局永远
+      // 等于 fit（≤ 媒体框，无截断风险），scale 全部以 residual 走 transform。
+      // 这是自洽的：fit > natural 意味着 scale=1 就已在 1:1 之外，插值不可避免，
+      // 布局再放大没有任何画质收益，只会徒增截断与重栅格化开销。
       const oneToOne = Math.max(1, natural / fit.w),
         layoutScale = Math.min(t.scale, oneToOne);
       residual = t.scale / layoutScale;
@@ -506,6 +555,19 @@ function syncViewerTier({ force = false } = {}) {
   let tier = force
     ? VIEWER_TIER_WIDTHS.length
     : viewerPickTier(needed, current);
+
+  // 源图守卫：目标档的供给宽度已不小于数据库里的源宽时，这一档只会拿回一张与
+  // 原图无差别（甚至更差）的重编码。直接跳到原图档，省掉逐级 2048、4096 的
+  // 无效请求——实测一张 1200px 的源图在放大判读时会因此连发两个多余请求。
+  // 放在 syncViewerTier 而不是 viewerPickTier：pickTier 是只吃 (needed, current)
+  // 的纯函数（多条测试与滞回逻辑都钉在它上面），而「源有多宽」只有这里拿得到
+  // （payload 的 p.width）。width 缺失（0）时不守卫，退回逐级换源的老路。
+  if (
+    tier < VIEWER_TIER_WIDTHS.length &&
+    Number(p.width) > 0 &&
+    VIEWER_TIER_WIDTHS[tier] >= Number(p.width)
+  )
+    tier = VIEWER_TIER_WIDTHS.length;
 
   // 目标档位已失败（NAS 读不到）→ 退回当前能用的那一档，绝不留下空白。
   while (
@@ -1101,6 +1163,21 @@ function openViewer(i) {
   // 换源判定同样要等：此刻才知道「首屏这张 2048px 的图够不够铺满当前 scale」。
   const img = $("#viewerImage");
   const settled = () => {
+    // 首张位图落地后重排版——「所有图都差一点不满窗」「有些图特别小」两个症状
+    // 共同的根因修复。
+    //
+    // renderViewerPhoto 里的 resetViewerTransform 跑在 img.src 赋值**之前**，那
+    // 一刻 naturalWidth 还是上一张照片的位图（首开时是 0）：按旧位图算出的 fit
+    // 写进 width/height 后，没有任何东西会在新位图解码完成时重算，画面就永远停
+    // 在旧布局 / CSS 旧上限上。此刻 naturalWidth 已是新照片的，重跑一次
+    // applyViewerTransform 即落到真实 fit（JS 算的媒体框尺寸，不再吃 CSS 旧上限）。
+    //
+    // 幂等性：与换档到货监听器里的 applyViewerTransform 输入相同（同一 natural、
+    // 同一 scale），连跑两次结果一致。动态照片路径：setupMotionViewer 已把
+    // viewerMotion.active 置真，viewerTransformTarget 切到 #viewerVideo，这里走
+    // isImage=false 分支（清 image 内联样式、video 挂 scale(1)），与
+    // setupMotionViewer 里的 resetViewerTransform 行为一致，不会破坏动态照片。
+    applyViewerTransform();
     syncViewerOriginalState();
     syncViewerTier();
     // 打开时也报一次：否则「只打开不缩放」这一路径完全没有数据，而那恰恰是

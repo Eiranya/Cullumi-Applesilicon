@@ -35,7 +35,13 @@ const state = {
     ai: new Set(AI_VALUES),
     formats: new Set(),
   },
-  librarySort: "suggestion",
+  // 初始排序必须是 filename（照片库组的默认，用户裁决「除智能建议外一律按
+  // 文件名排序」）。曾经是 "suggestion"，但 suggestion 只是「智能建议」组的
+  // 默认；打开项目时 session.js 会经 libraryGroupSortDefaults 再落一次，
+  // 这里的初值只为在任何视图渲染前有个诚实且一致的取值。
+  // 下面的 similar.sort: "suggestion" 是相似连拍视图的排序，属另一套状态，
+  // 不在本裁决范围内，不要动。
+  librarySort: "filename",
   librarySortDirection: "asc",
   library: { offset: 0, total: 0, done: false, loading: false, generation: 0 },
   similar: {
