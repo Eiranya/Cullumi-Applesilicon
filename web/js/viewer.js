@@ -1147,6 +1147,28 @@ function renderViewerPhoto(p) {
   syncViewerOriginalState();
   if (p.motion && !p.motion.error) setupMotionViewer(p);
 }
+// ── 底部状态行开关（设置 → 图片查看 →「显示底部状态行」，默认关）──────────
+//
+// 键是 viewer_bottom_status_lines，语义是「显示」，默认隐藏以最大化图片显示
+// 面积。隐藏只是挂在 #viewer 上的 CSS 类（见 viewer.css）：renderViewerScaleHint
+// 与 syncViewerOriginalState 的写入逻辑照常运行——隐藏 ≠ 不更新，重新打开开关
+// 时内容就是最新的，不会闪旧值。
+function viewerStatusLinesShown() {
+  return !!(state.settings && state.settings.viewer_bottom_status_lines === true);
+}
+// 按当前设置挂/摘 hide-status-lines 类，并让已打开的查看器立即重排。
+//
+// figcaption 变矮会直接抬高媒体区（figure 的 grid 里媒体区是 1fr），等价一次
+// 窗口 resize——盒子尺寸变了必须重跑 fit，否则图片停留在旧框算出的尺寸上，
+// 藏行的效果要等到下一张照片才出现。与 resize 监听器走同一条路：
+// clampViewerPan + applyViewerTransform。
+function applyViewerStatusLinesSetting() {
+  $("#viewer").classList.toggle("hide-status-lines", !viewerStatusLinesShown());
+  if ($("#viewer").open) {
+    clampViewerPan();
+    applyViewerTransform();
+  }
+}
 function openViewer(i) {
   if (!state.items.length) return;
   // 向后越界（上一张越过第一张）仍然循环到末尾：这是既有行为，用户已确认保留。
@@ -1158,6 +1180,9 @@ function openViewer(i) {
   const p = state.items[state.viewerIndex];
   renderViewerPhoto(p);
   syncViewerSubtitle();
+  // 显示之前先按当前设置挂/摘状态行类：figcaption 高度在首帧就正确，
+  // 媒体框尺寸（fit 的输入）不会经历一次可见的重排。
+  applyViewerStatusLinesSetting();
   if (!$("#viewer").open) $("#viewer").showModal();
   // 位图解码完成后才知道 naturalWidth / offsetWidth，状态提示要等这一刻，
   // 换源判定同样要等：此刻才知道「首屏这张 2048px 的图够不够铺满当前 scale」。

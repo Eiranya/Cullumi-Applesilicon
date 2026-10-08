@@ -810,6 +810,11 @@ function bindSettingsEvents() {
     $("#profileEditorSelect").value =
       state.project?.profile_id || state.profiles[0]?.id;
     editorLoad($("#profileEditorSelect").value);
+    // 开机时 bootstrap 已把设置装进 state（session.js 的 boot），这里只负责把
+    // 持久化值回放到开关上。语义是「显示」：只有 true 才勾选，缺省/非法一律
+    // 视为关（隐藏）。
+    $("#viewerBottomStatusLines").checked =
+      state.settings.viewer_bottom_status_lines === true;
   };
   $$("[data-setting]").forEach(
     (button) => (button.onclick = () => selectSettingsPage(button)),
@@ -952,6 +957,24 @@ function bindSettingsEvents() {
       event.target.value = previous;
       toast(`保存输入设备设置失败：${error.message}`);
     }
+  };
+  // 底部状态行：默认隐藏（键语义是「显示」），关闭可增大图片显示面积。
+  // 保存失败把勾选退回旧值；无论成败都重套一次类——切换要立即生效，包括当前
+  // 已打开的查看器（figcaption 变矮后媒体区变高，applyViewerStatusLinesSetting
+  // 内部会按 resize 语义重跑 fit）。
+  $("#viewerBottomStatusLines").onchange = async (event) => {
+    const previous = state.settings.viewer_bottom_status_lines === true;
+    try {
+      const saved = await json("/api/settings", {
+        viewer_bottom_status_lines: event.target.checked,
+      });
+      state.settings.viewer_bottom_status_lines =
+        saved.settings.viewer_bottom_status_lines === true;
+    } catch (error) {
+      event.target.checked = previous;
+      toast(`保存状态行设置失败：${error.message}`);
+    }
+    applyViewerStatusLinesSetting();
   };
   $("#checkUpdateBtn").onclick = () => checkForUpdates(true);
   $("#defaultCacheBtn").onclick = chooseDefaultCache;

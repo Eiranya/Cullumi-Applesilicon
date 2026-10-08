@@ -675,6 +675,11 @@ class Handler(BaseHTTPRequestHandler):
                     "viewer_wheel_mouse_sensitivity", 1.0
                 ),
                 "viewer_wheel_device": config_data.get("viewer_wheel_device", "auto"),
+                # 查看器底部状态行（画质/缩放提示 + 原图提示）的显示开关，
+                # 默认 False（隐藏）。前端以 === true 判定，缺省或非法值等效隐藏。
+                "viewer_bottom_status_lines": config_data.get(
+                    "viewer_bottom_status_lines", False
+                ),
                 "theme": config_data.get("theme", "day"),
             },
             "recent_projects": recent,

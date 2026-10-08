@@ -39,6 +39,7 @@ from cullumi.photo_query_service import (
 )
 from cullumi.project_store import ProjectManager, connect_db
 from cullumi.scanner import Scanner
+from cullumi.settings_service import save_settings
 from cullumi.similarity import SimilarityGroupCache
 from cullumi.workflows import (
     apply_quarantine,
@@ -2475,6 +2476,8 @@ class ViewerTierSwapTests(unittest.TestCase):
       viewerTierTimer: null,
       viewerOriginalFailed: new Set(),
       viewerClickTimer: null,
+      // 设置面板/状态行开关共享的设置容器；bootstrap 之后由真实应用填充。
+      settings: {},
     };
     // A controllable Image: tests decide when (and whether) it loads.
     global.__probes = [];
@@ -2504,6 +2507,7 @@ class ViewerTierSwapTests(unittest.TestCase):
   syncViewerOriginalState, renderViewerZoomState,
   // fit 布局与首载重排版（ViewerFitLayoutQATests）需要的一组出口。
   viewerFitSize, viewerUnscaledSize, openViewer,
+  applyViewerStatusLinesSetting,
   scheduleViewerDiag, reportViewerDiag, VIEWER_FIT_MAX_SCALE,
   viewerWheelPixels, viewerWheelDeviceKind,
   viewerWheelDevice, viewerWheelSensitivity, viewerWheelZoomFactor,
@@ -7941,6 +7945,311 @@ class GroupSortDefaultSourcePins(unittest.TestCase):
         self.assertIn('libraryGroupSortDefaults("library")', source)
         # 旧写法不得残留：直接写死 "suggestion" 就是两处口径分家的开始。
         self.assertNotIn('state.librarySort = "suggestion"', source)
+
+
+class ViewerBottomStatusLinesSettingTests(unittest.TestCase):
+    """查看器底部状态行开关的后端契约：默认隐藏、非法值回落。
+
+    键 `viewer_bottom_status_lines` 语义是「显示」，默认 False（隐藏）以最大化
+    图片显示面积。与 fast_analysis 等布尔键刻意不同：那些开关影响分析与决定
+    流程，非法值必须报错让用户知道；这一项是纯外观，任何非法值都静默回落到
+    False，而不是让整个设置事务失败（settings_service.save_settings 里有同款
+    注释）。
+    """
+
+    def test_true_round_trips_and_survives_a_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.json"
+            config = ConfigStore(path)
+            # 默认（键不存在）：bootstrap 以缺省 False 下发、前端以 === true 判定，
+            # 缺席即隐藏。这里钉住「全新安装不含该键」的形态。
+            self.assertNotIn("viewer_bottom_status_lines", config.snapshot())
+            saved = save_settings(config, {"viewer_bottom_status_lines": True})
+            self.assertIs(saved["viewer_bottom_status_lines"], True)
+            # 写 true 后重启（重新读盘）仍为 true：设置必须跨启动持久。
+            self.assertIs(
+                ConfigStore(path).snapshot()["viewer_bottom_status_lines"], True
+            )
+
+    def test_invalid_values_fall_back_to_false(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = ConfigStore(Path(temporary) / "config.json")
+            save_settings(config, {"viewer_bottom_status_lines": True})
+            # 非法值不抛错、不保留旧值：一律回落 False（隐藏）。
+            for invalid in ("yes", 1, None, [True]):
+                saved = save_settings(
+                    config, {"viewer_bottom_status_lines": invalid}
+                )
+                self.assertIs(
+                    saved["viewer_bottom_status_lines"],
+                    False,
+                    msg=f"非法值 {invalid!r} 未回落到 False",
+                )
+
+
+class ViewerStatusLinesQATests(unittest.TestCase):
+    """「显示底部状态行」开关（默认关）的前端契约。
+
+    设置 → 图片查看 →「显示底部状态行」控制查看器 figcaption 里的两行提示
+    （#viewerScaleHint 画质/缩放行、#viewerOriginalHint 原图行）。实现是挂在
+    #viewer dialog 上的 hide-status-lines 类 + viewer.css 的 display:none。
+    三条硬性要求各有一条测试钉住：
+
+    1. 默认（无设置/false）隐藏、true 显示（test_default_and_toggle_states）；
+    2. 切换立即生效且图片真的变大——figcaption 变矮抬高媒体区（figure grid 的
+       1fr 行），等价一次窗口 resize，必须重跑 applyViewerTransform
+       （test_toggling_reruns_fit_for_the_new_media_box）；
+    3. 隐藏 ≠ 不更新：写入逻辑照常运行，重新打开开关时内容是新的
+       （test_hints_keep_updating_while_hidden）。
+
+    另有两条静态钉子：CSS 作用域只许命中两行提示（#viewerMeta 与
+    .viewer-title-line 永远保留），以及 openViewer 每次打开都按当前设置套类。
+    """
+
+    SCRIPT = ViewerTierSwapTests.SCRIPT
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.node = shutil.which("node")
+        if not cls.node:
+            raise unittest.SkipTest("需要 node 才能执行 viewer.js 的状态行逻辑")
+        cls.web = Path(__file__).parents[1] / "web" / "js" / "viewer.js"
+        cls.css = Path(__file__).parents[1] / "web" / "css" / "viewer.css"
+        cls.harness = Path(tempfile.mkdtemp()) / "status-lines-harness.js"
+        cls.harness.write_text(cls.SCRIPT, encoding="utf-8")
+
+    def run_viewer(self, body: str) -> dict[str, Any]:
+        """Execute ``body`` with ``__viewer`` in scope; return its JSON result."""
+        script = f"require({str(self.harness)!r});\n{body}\n"
+        completed = subprocess.run(
+            [self.node, "-e", script, str(self.web)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if completed.returncode != 0:
+            self.fail(f"harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_default_and_toggle_states(self) -> None:
+        """默认（无设置或 false）挂 hide 类；true 摘类。
+
+        反向证明：删掉 applyViewerStatusLinesSetting 里的 classList.toggle，
+        前两条断言红；把判定改成 `!== false`（缺省即显示），noSetting 红。
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            delete st.settings;   // 全新安装：bootstrap 尚未写入该键
+            v.applyViewerStatusLinesSetting();
+            const noSetting = document.querySelector("#viewer")
+              .classList.contains("hide-status-lines");
+            st.settings = { viewer_bottom_status_lines: false };
+            v.applyViewerStatusLinesSetting();
+            const explicitOff = document.querySelector("#viewer")
+              .classList.contains("hide-status-lines");
+            st.settings = { viewer_bottom_status_lines: true };
+            v.applyViewerStatusLinesSetting();
+            const shown = document.querySelector("#viewer")
+              .classList.contains("hide-status-lines");
+            // 脏值（手改配置文件经 bootstrap 原样透传）必须按隐藏处理：
+            // 判定只认严格 true，字符串/数字一概不算「显示」。
+            st.settings = { viewer_bottom_status_lines: "yes" };
+            v.applyViewerStatusLinesSetting();
+            const dirtyString = document.querySelector("#viewer")
+              .classList.contains("hide-status-lines");
+            st.settings = { viewer_bottom_status_lines: 1 };
+            v.applyViewerStatusLinesSetting();
+            const dirtyNumber = document.querySelector("#viewer")
+              .classList.contains("hide-status-lines");
+            console.log(JSON.stringify({noSetting, explicitOff, shown,
+                                        dirtyString, dirtyNumber}));
+            """
+        )
+        self.assertTrue(result["noSetting"], "无设置时未隐藏状态行")
+        self.assertTrue(result["explicitOff"], "显式 false 时未隐藏状态行")
+        self.assertFalse(result["shown"], "开启后状态行仍是隐藏的")
+        self.assertTrue(
+            result["dirtyString"], "脏值 'yes' 未按隐藏处理（判定被放松成 truthy？）"
+        )
+        self.assertTrue(
+            result["dirtyNumber"], "脏值 1 未按隐藏处理（判定被放松成 truthy？）"
+        )
+
+    def test_open_viewer_applies_the_current_setting(self) -> None:
+        """打开查看器即按当前设置呈现；换照片（对话框已开）也要重套。
+
+        反向证明：删掉 openViewer 里的 applyViewerStatusLinesSetting() 调用，
+        两条断言红。
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            global.variantFormatText = () => "";
+            global.formatSize = (n) => `${n}B`;
+            st.settings = { viewer_bottom_status_lines: true };
+            st.items = [{ id: 4, width: 4000, height: 3000,
+                          relative_path: "trip/IMG_0004.JPG",
+                          media_type: "image", size: 1,
+                          photo_url: "/p", preview_url: "/p&w=1024" }];
+            const img = document.querySelector("#viewerImage");
+            img.naturalWidth = 1024; img.naturalHeight = 683;
+            img._attrs.src = "/p&w=1024";
+            v.openViewer(0);
+            const shownOnOpen = !document.querySelector("#viewer")
+              .classList.contains("hide-status-lines");
+            // 用户中途关掉开关：下一张照片（对话框未关）必须按新设置呈现。
+            st.settings = {};
+            st.items.push({ id: 5, width: 4000, height: 3000,
+                            relative_path: "trip/IMG_0005.JPG",
+                            media_type: "image", size: 1,
+                            photo_url: "/q", preview_url: "/q&w=1024" });
+            img.complete = false;
+            v.openViewer(1);
+            const hiddenAfterToggle = document.querySelector("#viewer")
+              .classList.contains("hide-status-lines");
+            console.log(JSON.stringify({shownOnOpen, hiddenAfterToggle}));
+            """
+        )
+        self.assertTrue(result["shownOnOpen"], "开启时打开查看器未显示状态行")
+        self.assertTrue(result["hiddenAfterToggle"], "关闭后未对新照片生效")
+
+    def test_toggling_reruns_fit_for_the_new_media_box(self) -> None:
+        """藏行让 figcaption 变矮、媒体区（figure grid 的 1fr 行）变高——
+        等价一次窗口 resize，必须重跑 applyViewerTransform，图片要真的变大。
+
+        反向证明：删掉 applyViewerStatusLinesSetting 里的 clampViewerPan +
+        applyViewerTransform，written 高度停在旧框的 1013，后两条断言红。
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            st.settings = { viewer_bottom_status_lines: true };
+            st.items = [{ id: 6, width: 7008, height: 4672,
+                          photo_url: "/p", preview_url: "/p&w=1024" }];
+            const img = document.querySelector("#viewerImage");
+            // 竖构图位图：高度先到框底，框变高 fit 才真的变大。
+            img.naturalWidth = 800; img.naturalHeight = 1200;
+            img._attrs.src = "/p&w=1024";
+            img.parentElement.clientWidth = 1521;
+            img.parentElement.clientHeight = 1013;
+            document.querySelector("#viewer").open = true;
+            st.viewerTransform.scale = 1;
+            v.applyViewerTransform();
+            const px = (s) => parseFloat(s) || 0;
+            const before = { w: px(img.style.width), h: px(img.style.height) };
+            // 关掉开关。真实浏览器里 figcaption 少两行、媒体区 clientHeight
+            // 随之变大；桩没有布局引擎，直接把媒体框改大来模拟重排之后的世界。
+            st.settings = {};
+            img.parentElement.clientHeight = 1100;
+            v.applyViewerStatusLinesSetting();
+            const after = { w: px(img.style.width), h: px(img.style.height) };
+            console.log(JSON.stringify({before, after}));
+            """
+        )
+        self.assertAlmostEqual(result["before"]["h"], 1013, places=6)
+        self.assertAlmostEqual(result["after"]["h"], 1100, places=6,
+                               msg="切换后没有按新媒体框重跑 fit")
+        self.assertAlmostEqual(
+            result["after"]["w"], 800 * 1100 / 1200, places=6,
+            msg="切换后图片没有随媒体框变大",
+        )
+        self.assertGreater(result["after"]["w"], result["before"]["w"])
+
+    def test_hints_keep_updating_while_hidden(self) -> None:
+        """隐藏 ≠ 不更新：藏着的时候换档/换图，重新打开开关必须是新值。
+
+        反向证明：把实现改成「隐藏时顺手清空两行提示」或「隐藏时跳过写入」
+        （隐藏=不更新的两种自然写法），afterShow 的内容断言红。
+        """
+        result = self.run_viewer(
+            """
+            const v = __viewer;
+            const st = v._state;
+            st.settings = {};
+            st.items = [{ id: 8, width: 7008, height: 4672,
+                          relative_path: "trip/IMG_0008.JPG",
+                          media_type: "image", size: 1,
+                          photo_url: "/p", preview_url: "/p&w=1024" }];
+            const img = document.querySelector("#viewerImage");
+            img.naturalWidth = 1024; img.naturalHeight = 683;
+            img.offsetWidth = 1519; img.offsetHeight = 1013;
+            img._attrs.src = "/p&w=1024";
+            img.parentElement.clientWidth = 1521;
+            img.parentElement.clientHeight = 1013;
+            v.applyViewerStatusLinesSetting();
+            const hidden = document.querySelector("#viewer")
+              .classList.contains("hide-status-lines");
+            // 隐藏态写入 2048 档的提示，随后仍在隐藏态把内容改到 4096 档。
+            st.viewerTier = 1;
+            v.syncViewerOriginalState();
+            const stale = document.querySelector("#viewerOriginalHint").textContent;
+            st.viewerTier = 2;
+            v.syncViewerOriginalState();
+            const updatedWhileHidden =
+              document.querySelector("#viewerOriginalHint").textContent;
+            st.settings = { viewer_bottom_status_lines: true };
+            v.applyViewerStatusLinesSetting();
+            const shown = !document.querySelector("#viewer")
+              .classList.contains("hide-status-lines");
+            const afterShow = document.querySelector("#viewerOriginalHint").textContent;
+            // 再藏一次再显示，中间不写入：display:none 必须原样保留内容。
+            // 「隐藏时顺手清空两行提示」的实现（隐藏=不更新的另一种写法）在这里红。
+            st.settings = {};
+            v.applyViewerStatusLinesSetting();
+            st.settings = { viewer_bottom_status_lines: true };
+            v.applyViewerStatusLinesSetting();
+            const afterReshow = document.querySelector("#viewerOriginalHint").textContent;
+            console.log(JSON.stringify({hidden, stale, updatedWhileHidden,
+                                        shown, afterShow, afterReshow}));
+            """
+        )
+        self.assertTrue(result["hidden"])
+        self.assertEqual(result["stale"], "当前 2048px 画质，放大可自动换源")
+        self.assertEqual(
+            result["updatedWhileHidden"], "当前 4096px 画质，放大可自动换源",
+            msg="隐藏态没有照常更新提示内容",
+        )
+        self.assertTrue(result["shown"])
+        self.assertEqual(
+            result["afterShow"], "当前 4096px 画质，放大可自动换源",
+            msg="重新显示后提示内容是旧值或被清空",
+        )
+        self.assertEqual(
+            result["afterReshow"], "当前 4096px 画质，放大可自动换源",
+            msg="隐藏时清空了提示内容（隐藏 ≠ 清空）",
+        )
+
+    def test_status_lines_css_only_targets_the_two_hints(self) -> None:
+        """开关的作用域只许是两行提示：#viewerMeta 与 .viewer-title-line 永远保留。
+
+        反向证明：把选择器放宽成 `#viewer.hide-status-lines figcaption span`
+        （波及 meta 行），选择器集合断言红。
+        """
+        css = self.css.read_text(encoding="utf-8")
+        # 先剥注释再解析：注释里出现类名/大括号都不该影响解析。
+        css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+        match = re.search(r"#viewer\.hide-status-lines[^{}]*\{[^{}]*\}", css)
+        self.assertIsNotNone(match, "viewer.css 缺少 hide-status-lines 规则")
+        rule = match.group(0)
+        self.assertIn("display: none", rule)
+        selectors = sorted(
+            s.strip() for s in rule.split("{")[0].split(",")
+        )
+        self.assertEqual(
+            selectors,
+            sorted([
+                "#viewer.hide-status-lines #viewerScaleHint",
+                "#viewer.hide-status-lines #viewerOriginalHint",
+            ]),
+            msg="hide-status-lines 的选择器命中了提示行之外的元素",
+        )
+        # 元信息行与文件名行不得被这条规则波及。
+        self.assertNotIn("#viewerMeta", rule)
+        self.assertNotIn("viewer-title-line", rule)
 
 
 if __name__ == "__main__":

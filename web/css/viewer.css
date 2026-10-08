@@ -274,6 +274,16 @@
   color: var(--muted);
 }
 
+/* 设置 → 图片查看 →「显示底部状态行」（默认关，最大化图片显示面积）。
+ * 只藏画质/缩放提示与原图提示这两行；文件名行（.viewer-title-line）与元信息行
+ * （#viewerMeta）永远不受该开关影响。figcaption 在 figure 的 grid 里占 auto 行、
+ * 媒体区是 1fr，两行藏起后媒体区自然变高。两个 hint 的写入逻辑照常运行——
+ * 隐藏 ≠ 不更新，重新打开开关时内容就是最新的。 */
+#viewer.hide-status-lines #viewerScaleHint,
+#viewer.hide-status-lines #viewerOriginalHint {
+  display: none;
+}
+
 .viewer #viewerImage {
   transform-origin: center center;
   /* 这里**不能**有 will-change: transform。

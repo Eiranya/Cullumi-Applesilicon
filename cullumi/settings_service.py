@@ -63,6 +63,16 @@ def save_settings(config: ConfigStore, body: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{key} 超出允许范围 0.5–2.0")
         updates[key] = round(value, 2)
 
+    if "viewer_bottom_status_lines" in body:
+        # 查看器底部状态行（画质/缩放提示 + 原图提示）的显示开关，语义是
+        # 「显示」，默认 False（隐藏）以最大化图片显示面积。
+        # 与上面的布尔键刻意不同：那些开关影响分析与决定流程，非法值必须报错
+        # 让用户知道；这一项是纯外观开关，任何非法值（旧客户端、手改的配置
+        # 文件）都静默回落到 False（隐藏），而不是让整个设置事务失败。
+        updates["viewer_bottom_status_lines"] = (
+            body["viewer_bottom_status_lines"] is True
+        )
+
     if "viewer_wheel_device" in body:
         device = str(body["viewer_wheel_device"])
         if device not in {"auto", "trackpad", "mouse"}:
