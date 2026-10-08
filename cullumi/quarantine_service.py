@@ -309,7 +309,7 @@ def apply_quarantine(project: Project) -> dict[str, Any]:
 
 @dataclass
 class _TaskProgress:
-    """Mutable progress record for one background quarantine run.
+    """Mutable progress record for one background quarantine/restore run.
 
     Deliberately a separate store from :attr:`Scanner.progress`: a scan is
     keyed by project and reports a *stage*, while a quarantine run is keyed by
@@ -318,9 +318,16 @@ class _TaskProgress:
     discriminated-union payload at every reader. The lookup-and-lock
     discipline is what is worth sharing, and that is inherited from the same
     shape rather than the same object.
+
+    ``operation`` says which of the two flows this record belongs to
+    ("quarantine" or "restore"). 恢复复用了整套 runner／槽位／轮询端点，
+    只把操作类型一路带到 payload：前端浮条的标题、完成行文案和忙碌
+    toast 都按它区分，否则用户在恢复进行中点隔离，收到的拒绝提示
+    只能写成含糊的「已有任务在进行中」。
     """
 
     batch_id: str
+    operation: str = "quarantine"
     stage: str = "preparing"
     current: int = 0
     total: int = 0
@@ -336,12 +343,15 @@ class _TaskProgress:
     # 搬**之后**失败（rebuild_capture_variants / _write_manifest_csv 抛异常）——
     # 文件已经在磁盘上不在库里，缓存若不作废就会长期描述一批不存在的照片。
     # 只看 stage 无法区分：两种情况都是 stage="error"。
+    # 恢复沿用同一语义：只要真的把文件搬回了原处（包括冲突改名恢复），
+    # 库的真实内容就变了，缓存同样必须作废。
     moved_any: bool = False
     result: dict[str, Any] = field(default_factory=dict)
 
     def payload(self) -> dict[str, Any]:
         return {
             "batch_id": self.batch_id,
+            "operation": self.operation,
             "stage": self.stage,
             "current": self.current,
             "total": self.total,
@@ -363,6 +373,10 @@ class QuarantineRunner:
     but keyed by project with at most one live run, because two concurrent
     quarantine runs on one library would race on the manifest and on
     ``rebuild_capture_variants``.
+
+    恢复复用同一个类而不是新建 runner：两种操作写同一套 manifest/photos
+    表、跑同一个 ``rebuild_capture_variants``，并发跑任何一个组合都会互踩，
+    所以它们必须共享同一个「每项目一个槽位」的互斥，而不是各持各的锁。
     """
 
     def __init__(
@@ -384,25 +398,53 @@ class QuarantineRunner:
         return record.payload()
 
     def start(self, project_id: str) -> dict[str, Any]:
-        """Start a run and return immediately with its batch id.
+        """Start a quarantine run and return immediately with its batch id.
 
-        Returns ``{"batch_id", "started"}``. ``started`` is False when a run is
-        already in flight for this project, so the caller can tell "already
+        Returns ``{"batch_id", "operation", "started"}``. ``started`` is False
+        when a run is already in flight for this project (quarantine *or*
+        restore -- they share the slot), so the caller can tell "already
         working on it" apart from "here is your batch to poll".
         """
+        return self._start(project_id, "quarantine")
+
+    def start_restore(self, project_id: str, batch_id: str) -> dict[str, Any]:
+        """Start restoring ``batch_id`` on the background thread.
+
+        Mirrors :meth:`start` but for an *existing* quarantine batch, so the
+        batch id comes from the caller instead of being minted here. The
+        format check happens before the thread starts on purpose: the old
+        synchronous handler surfaced a malformed batch id as an immediate
+        request error, and moving the check into the thread would turn it
+        into a late toast for no gain.
+        """
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", batch_id or ""):
+            raise ValueError("隔离批次标识无效")
+        return self._start(project_id, "restore", batch_id)
+
+    def _start(
+        self, project_id: str, operation: str, batch_id: str | None = None
+    ) -> dict[str, Any]:
         with self._lock:
             existing = self._threads.get(project_id)
             if existing is not None and existing.is_alive():
-                return {"batch_id": self._progress[project_id].batch_id, "started": False}
-            batch_id = _new_batch_id()
-            record = _TaskProgress(batch_id=batch_id)
+                record = self._progress[project_id]
+                # operation 随忙碌响应一起返回：前端拒绝 toast 要按「实际在跑
+                # 的操作」措辞（恢复在跑就说恢复），而不是按这次点击的按钮。
+                return {
+                    "batch_id": record.batch_id,
+                    "operation": record.operation,
+                    "started": False,
+                }
+            if batch_id is None:
+                batch_id = _new_batch_id()
+            record = _TaskProgress(batch_id=batch_id, operation=operation)
             self._progress[project_id] = record
             thread = threading.Thread(
                 target=self._run, args=(project_id, record), daemon=True
             )
             self._threads[project_id] = thread
         thread.start()
-        return {"batch_id": batch_id, "started": True}
+        return {"batch_id": batch_id, "operation": operation, "started": True}
 
     def _update(self, record: _TaskProgress, **values: Any) -> None:
         with self._lock:
@@ -410,12 +452,14 @@ class QuarantineRunner:
                 setattr(record, key, value)
 
     def _reporter(self, record: _TaskProgress) -> Callable[[dict[str, Any]], None]:
-        """Adapt ``run_quarantine_batch``'s report callback to the record.
+        """Adapt the batch loop's report callback to the record.
 
-        The per-item ``moved`` count is what tells us a file genuinely left its
-        original location, so ``moved_any`` is latched from it as the run
-        progresses rather than only at the end -- a later bookkeeping failure
-        must not be able to hide the fact that files were already moved.
+        Both flows report their running file count under the same ``moved``
+        key (quarantine: files moved out; restore: files moved back), which is
+        what tells us a file genuinely left its location, so ``moved_any`` is
+        latched from it as the run progresses rather than only at the end -- a
+        later bookkeeping failure must not be able to hide the fact that files
+        were already moved.
         """
 
         def report(progress: dict[str, Any]) -> None:
@@ -425,6 +469,42 @@ class QuarantineRunner:
 
         return report
 
+    def _execute_quarantine(
+        self, project: Project, record: _TaskProgress
+    ) -> dict[str, Any]:
+        manifest_path, batch_root, manifest, prepared = (
+            prepare_quarantine_batch(project, record.batch_id)
+        )
+        self._update(record, stage="moving", total=len(prepared))
+        result = run_quarantine_batch(
+            project,
+            record.batch_id,
+            manifest_path,
+            batch_root,
+            manifest,
+            prepared,
+            self._reporter(record),
+        )
+        # Belt and braces: the live report already flipped moved_any on the
+        # first successful move, but derive it from the final counts too so
+        # the flag cannot be left false after a run that demonstrably moved
+        # something.
+        self._update(record, moved_any=record.moved_any or result["moved"] > 0)
+        return result
+
+    def _execute_restore(
+        self, project: Project, record: _TaskProgress
+    ) -> dict[str, Any]:
+        self._update(record, stage="restoring")
+        result = restore_batch(project, record.batch_id, self._reporter(record))
+        # 与隔离同款的 belt and braces：live report 已在第一个文件搬回时置位
+        # moved_any，这里再从最终计数推一次。冲突改名恢复也计入 restored，
+        # 所以「有冲突但都搬回了」同样会作废缓存——这是对的，磁盘内容变了。
+        self._update(
+            record, moved_any=record.moved_any or result["restored"] > 0
+        )
+        return result
+
     def _run(self, project_id: str, record: _TaskProgress) -> None:
         try:
             # 两层锁都必须保留，缺一不可（这是从同步 handler 拆到线程时最容易丢的一层）：
@@ -432,30 +512,17 @@ class QuarantineRunner:
             #   data_operation   —— 写入不得与缓存迁移交叉（见 project_store 的
             #                       docstring），apply_profile 与迁移缓存的路由都取它。
             # 后者与前者语义不同，不是冗余：少了它，后台隔离会在 apply_profile
-            # 搬迁缓存的同时搬照片。
-            with self._operation(project_id, "隔离照片"):
+            # 搬迁缓存的同时搬照片。恢复线程同样两层全持：它一样在搬照片、
+            # 一样跑 rebuild_capture_variants，与同步时代的 api_restore 持锁
+            # 方式保持一致。
+            label = "恢复照片" if record.operation == "restore" else "隔离照片"
+            with self._operation(project_id, label):
                 with self._manager.data_operation(project_id):
                     project = self._manager.from_id(project_id)
-                    manifest_path, batch_root, manifest, prepared = (
-                        prepare_quarantine_batch(project, record.batch_id)
-                    )
-                    self._update(record, stage="moving", total=len(prepared))
-                    result = run_quarantine_batch(
-                        project,
-                        record.batch_id,
-                        manifest_path,
-                        batch_root,
-                        manifest,
-                        prepared,
-                        self._reporter(record),
-                    )
-                    # Belt and braces: the live report already flipped
-                    # moved_any on the first successful move, but derive it from
-                    # the final counts too so the flag cannot be left false
-                    # after a run that demonstrably moved something.
-                    self._update(
-                        record, moved_any=record.moved_any or result["moved"] > 0
-                    )
+                    if record.operation == "restore":
+                        result = self._execute_restore(project, record)
+                    else:
+                        result = self._execute_quarantine(project, record)
             self._update(record, stage="complete", done=True, result=result)
         except Exception as error:
             self._update(
@@ -760,7 +827,22 @@ def _restore_files_remain(
     return False
 
 
-def restore_batch(project: Project, batch_id: str) -> dict[str, Any]:
+def restore_batch(
+    project: Project,
+    batch_id: str,
+    report: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Restore every eligible manifest item of ``batch_id`` back to the library.
+
+    The loop body is unchanged: same per-item order, same skip rules, same
+    conflict renaming, same final bookkeeping. ``report`` is the only
+    addition -- the same per-item frame ``run_quarantine_batch`` emits, so one
+    poller serves both flows. It is optional (no-op by default) because the
+    synchronous entry point is still called with two arguments by tests and
+    scripts; only the background runner passes a callback.
+    """
+    if report is None:
+        report = lambda _frame: None  # noqa: E731 -- 对齐 apply_quarantine 的占位写法
     batch_root = _quarantine_batch_root(project, batch_id)
     with closing(connect_db(project.db_path)) as conn:
         batch = conn.execute("SELECT * FROM quarantine_batches WHERE id=?", (batch_id,)).fetchone()
@@ -770,8 +852,12 @@ def restore_batch(project: Project, batch_id: str) -> dict[str, Any]:
             project, batch_root, str(batch["manifest_path"])
         )
         paths = [_restore_paths(project, batch_root, item) for item in manifest]
+        # total 按清单条目数报（而不是「还有文件可搬的条目数」）：进度条的
+        # 分母要与「已处理 / 总数」逐项递增对得上，跳过的条目同样占一格。
+        total = len(manifest)
+        report({"current": 0, "total": total, "current_file": "", "moved": 0})
         restored = conflicts = missing = 0
-        for item, item_paths in zip(manifest, paths):
+        for index, (item, item_paths) in enumerate(zip(manifest, paths), start=1):
             item_restored, item_conflicts, item_missing = _restore_manifest_item(
                 project,
                 conn,
@@ -783,6 +869,20 @@ def restore_batch(project: Project, batch_id: str) -> dict[str, Any]:
             restored += item_restored
             conflicts += item_conflicts
             missing += item_missing
+            report(
+                {
+                    "current": index,
+                    "total": total,
+                    # current_file 报「这一条回到哪个文件」：恢复过的条目在
+                    # manifest 里记了 restore_path，优先用它（冲突改名后
+                    # relative_path 已不指向真实落点）；没有就用 relative_path。
+                    # 前端只取最后一段文件名展示。
+                    "current_file": str(
+                        item.get("restore_path") or item.get("relative_path") or ""
+                    ),
+                    "moved": restored,
+                }
+            )
         rebuild_capture_variants(conn, prune_similar=True)
         conn.commit()
         if not _restore_files_remain(manifest, paths):

@@ -63,7 +63,6 @@ from .project_store import (
 from .quarantine_service import (
     QuarantineRunner,
     quarantine_preview,
-    restore_batch,
 )
 from .scanner import Scanner
 from .settings_service import (
@@ -1159,15 +1158,17 @@ class Handler(BaseHTTPRequestHandler):
     def api_quarantine_progress(self) -> None:
         pid = self._query().get("project_id", [""])[0]
         progress = self.quarantine_runner.get_progress(pid)
-        # 何时该作废相似连拍缓存：只要「这一批动过文件」。
+        # 何时该作废相似连拍缓存：只要「这一批动过文件」。隔离与恢复共用
+        # 这一个端点、同一条判定：两者都会真的改变磁盘上的库（恢复含冲突
+        # 改名恢复），moved_any 语义一致。
         #
-        # 不能只看 stage == "complete"：run_quarantine_batch 在所有文件搬完、
-        # photos 表已更新之后才调 rebuild_capture_variants 与 _write_manifest_csv，
-        # 这两处任一抛异常都会记 stage="error"。那时文件已经不在磁盘上了，
-        # 缓存若不作废就会长期描述一批不存在的照片。
+        # 不能只看 stage == "complete"：run_quarantine_batch / restore_batch
+        # 都是在所有文件搬完、photos 表已更新之后才调 rebuild_capture_variants
+        # 与 _write_manifest_csv，这两处任一抛异常都会记 stage="error"。那时
+        # 文件已经不在原位了，缓存若不作废就会长期描述一批不存在的照片。
         #
-        # 也不能只看 idle 载荷的 done（它同样为真）——从未隔离过的项目会被
-        # 每次轮询都清一次缓存。moved_any 只在真的搬动过文件时才为真，
+        # 也不能只看 idle 载荷的 done（它同样为真）——从未隔离/恢复过的项目
+        # 会被每次轮询都清一次缓存。moved_any 只在真的搬动过文件时才为真，
         # 因此它同时满足两侧：搬完后失败要作废，搬动前失败（project_operation
         # 被占、批次目录建不出来，一个文件都没动）不作废。
         if progress.get("moved_any") or progress.get("stage") == "complete":
@@ -1175,9 +1176,16 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(progress)
 
     def api_restore(self, body: dict[str, Any]) -> None:
+        """Start a restore run and return its batch id without waiting.
+
+        Mirrors :meth:`api_quarantine_apply`: the restore itself happens on a
+        background thread owned by :class:`QuarantineRunner` (same per-project
+        slot, so a restore and a quarantine refuse to overlap), and the old
+        synchronous shape -- which held the confirm dialog hostage for the
+        whole batch -- is why large restores looked frozen. The similarity
+        cache is invalidated by the poller once the run reports moved files
+        (``moved_any``), not here; at this point nothing has moved yet.
+        """
         project_id = body["project_id"]
-        with self.scanner.project_operation(project_id, "恢复照片"):
-            with self.manager.data_operation(project_id):
-                result = restore_batch(self.manager.from_id(project_id), body["batch_id"])
-        self.similarity_groups.invalidate(project_id)
+        result = self.quarantine_runner.start_restore(project_id, body["batch_id"])
         self._send_json(result)

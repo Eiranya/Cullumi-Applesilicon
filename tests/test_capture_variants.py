@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from contextlib import closing, contextmanager
@@ -4885,6 +4886,379 @@ class QuarantineProgressTests(unittest.TestCase):
         self.assertFalse((self.photos / "z.jpg").exists())
 
 
+class RestoreProgressTests(unittest.TestCase):
+    """恢复也走后台进度：大批量恢复不再把确认框挂住。
+
+    用户原话的痛点：隔离历史里点「恢复此批次」→「确认恢复」后，同步的
+    ``api_restore`` 在 handler 里搬完整个批次才返回，文件多、传输慢时界面
+    就「卡住不动」。设计裁决：恢复复用隔离的后台 runner／进度槽位／轮询
+    端点，前端复用右下角浮条；完成行不放撤销按钮。
+
+    本类钉住三件事：``restore_batch`` 的逐文件 report（含旧调用形态的
+    兼容）、runner 的恢复入口与两条操作的互斥语义、恢复侧 ``moved_any``
+    的缓存作废语义。
+    """
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.photos = self.root / "photos"
+        self.photos.mkdir()
+        self.config = ConfigStore(self.root / "config.json")
+        self.config.data["default_cache_root"] = str(self.root / "cache")
+        self.config.save()
+        self.manager = ProjectManager(self.config)
+        self.project = self.manager.open(str(self.photos))
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def make_photo(
+        self, name: str, color: tuple[int, int, int] = (10, 20, 30)
+    ) -> None:
+        """Write a real file to disk (quarantine verifies size/mtime)."""
+        path = self.photos / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (64, 48), color).save(path, quality=92)
+
+    def scan(self) -> None:
+        scanner = Scanner(self.config, self.manager)
+        scanner.start(self.project.project_id)
+        scanner.threads[self.project.project_id].join(60)
+        progress = scanner.progress[self.project.project_id]
+        self.assertEqual(progress["stage"], "complete", progress)
+
+    def prepare(self, names: list[str]) -> None:
+        for index, name in enumerate(names):
+            self.make_photo(name, (10 + index * 7, 20, 30))
+        self.scan()
+        with closing(connect_db(self.project.db_path)) as conn:
+            conn.execute("UPDATE photos SET decision='remove'")
+            conn.commit()
+
+    def quarantined(self, names: list[str]) -> dict[str, Any]:
+        """prepare + 真隔离：恢复测试的批次必须真实存在、文件真的搬走了。"""
+        self.prepare(names)
+        return apply_quarantine(self.project)
+
+    def wait_for_progress(
+        self, runner: http_api.QuarantineRunner, project_id: str
+    ) -> dict[str, Any]:
+        for _ in range(600):
+            progress = runner.get_progress(project_id)
+            if progress.get("done"):
+                return progress
+            time.sleep(0.02)
+        self.fail("恢复任务未在预期时间内完成")
+
+    def test_restore_batch_reports_progress_frames(self) -> None:
+        """Per-file frames: 0/total up front, monotonic current, named file.
+
+        Reverse proof: removing the optional ``report`` parameter makes this
+        call a TypeError; keeping the parameter but never calling it leaves
+        ``frames`` empty and fails the first assertion.
+        """
+        batch = self.quarantined(["f-a.jpg", "f-b.jpg", "f-c.jpg"])
+        frames: list[dict[str, Any]] = []
+        result = restore_batch(self.project, batch["batch_id"], frames.append)
+        self.assertEqual(result["restored"], 3, result)
+        # The first frame announces the total before any file moved back.
+        self.assertEqual(
+            frames[0],
+            {"current": 0, "total": 3, "current_file": "", "moved": 0},
+            frames[0],
+        )
+        # One frame per manifest entry, in order, even for skipped ones --
+        # the progress bar's denominator must advance one tick per entry.
+        self.assertEqual([f["current"] for f in frames], [0, 1, 2, 3], frames)
+        self.assertEqual(frames[-1]["moved"], 3, frames[-1])
+        # The restored file is named: restore_path is recorded as the item is
+        # processed, so the frame for the first entry names it.
+        self.assertEqual(frames[1]["current_file"], "f-a.jpg", frames[1])
+
+    def test_restore_batch_without_a_report_keeps_the_old_call_shape(self) -> None:
+        """Synchronous callers (tests, scripting) must keep working untouched."""
+        batch = self.quarantined(["o.jpg"])
+        result = restore_batch(self.project, batch["batch_id"])
+        self.assertEqual(
+            result, {"restored": 1, "conflicts": 0, "missing": 0}, result
+        )
+        self.assertTrue((self.photos / "o.jpg").exists())
+
+    def test_restore_runner_completes_in_background(self) -> None:
+        """start_restore runs restore_batch on the thread and reports it.
+
+        Reverse proof: dispatching to the quarantine path instead would move
+        the files *into* a fresh quarantine batch -- the on-disk assertions
+        and the payload's ``operation`` both fail that.
+        """
+        batch = self.quarantined(["r1.jpg", "r2.jpg"])
+        scanner = Scanner(self.config, self.manager)
+        runner = http_api.QuarantineRunner(
+            self.manager, scanner.project_operation
+        )
+        started = runner.start_restore(
+            self.project.project_id, batch["batch_id"]
+        )
+        self.assertTrue(started["started"], started)
+        self.assertEqual(started["batch_id"], batch["batch_id"], started)
+        self.assertEqual(started["operation"], "restore", started)
+        final = self.wait_for_progress(runner, self.project.project_id)
+        self.assertEqual(final["stage"], "complete", final)
+        self.assertEqual(final["operation"], "restore", final)
+        self.assertEqual(final["total"], 2, final)
+        self.assertEqual(final["current"], 2, final)
+        self.assertEqual(final["result"]["restored"], 2, final)
+        self.assertTrue(final["moved_any"], final)
+        # The files really moved back, and the library says active again.
+        for name in ("r1.jpg", "r2.jpg"):
+            self.assertTrue((self.photos / name).exists())
+        with closing(connect_db(self.project.db_path)) as conn:
+            statuses = {
+                row["relative_path"]: row["status"]
+                for row in conn.execute(
+                    "SELECT relative_path,status FROM photos"
+                ).fetchall()
+            }
+        self.assertEqual(
+            statuses, {"r1.jpg": "active", "r2.jpg": "active"}, statuses
+        )
+
+    def test_busy_slot_refuses_both_kinds_and_names_the_running_operation(
+        self,
+    ) -> None:
+        """One slot per project: a running restore refuses quarantine too.
+
+        The refusal is the point of sharing one runner -- a quarantine and a
+        restore in parallel would race on the manifest and on
+        ``rebuild_capture_variants``. The busy response must carry the
+        *running* operation so the toast can say 恢复 rather than 隔离.
+
+        Reverse proof: dropping the alive-thread guard makes both second
+        starts report ``started: True``; dropping ``operation`` from the busy
+        response makes the KeyError-style assertions below fail.
+        """
+        batch = self.quarantined(["b1.jpg", "b2.jpg"])
+        scanner = Scanner(self.config, self.manager)
+        runner = http_api.QuarantineRunner(
+            self.manager, scanner.project_operation
+        )
+        release = threading.Event()
+        real_restore = quarantine_service.restore_batch
+
+        def slow_restore(project, batch_id, report=None):
+            release.wait(30)
+            return real_restore(project, batch_id, report)
+
+        with mock.patch.object(quarantine_service, "restore_batch", slow_restore):
+            first = runner.start_restore(
+                self.project.project_id, batch["batch_id"]
+            )
+            self.assertTrue(first["started"], first)
+            second = runner.start_restore(
+                self.project.project_id, batch["batch_id"]
+            )
+            quarantine_try = runner.start(self.project.project_id)
+        release.set()
+        self.wait_for_progress(runner, self.project.project_id)
+        self.assertFalse(second["started"], "并发恢复必须被拒绝")
+        self.assertEqual(second["batch_id"], first["batch_id"], second)
+        self.assertEqual(second["operation"], "restore", second)
+        self.assertFalse(quarantine_try["started"], "恢复在跑时隔离必须被拒绝")
+        self.assertEqual(quarantine_try["operation"], "restore", quarantine_try)
+
+    def test_start_restore_rejects_a_malformed_batch_id_up_front(self) -> None:
+        """The format check must fire before the thread, as a request error.
+
+        The old synchronous handler surfaced a malformed id as an immediate
+        400; moving the check into the thread would downgrade it to a late
+        toast and silently occupy the slot with a doomed run.
+        """
+        scanner = Scanner(self.config, self.manager)
+        runner = http_api.QuarantineRunner(
+            self.manager, scanner.project_operation
+        )
+        with self.assertRaises(ValueError):
+            runner.start_restore(self.project.project_id, "../escape")
+        self.assertEqual(
+            runner.get_progress(self.project.project_id),
+            {"stage": "idle", "done": True},
+            "被拒绝的请求不得占用进度槽位",
+        )
+
+    def test_a_restore_that_moved_files_invalidates_the_similarity_cache(
+        self,
+    ) -> None:
+        """moved_any latches for restore too, and the poller acts on it.
+
+        Reverse proof: if ``_execute_restore`` stopped deriving ``moved_any``
+        (live report or final count), ``progress["moved_any"]`` is False and
+        the endpoint reports no invalidation -- both assertions below fail.
+        """
+        batch = self.quarantined(["c1.jpg", "c2.jpg"])
+        runner = http_api.QuarantineRunner(
+            self.manager, Scanner(self.config, self.manager).project_operation
+        )
+        runner.start_restore(self.project.project_id, batch["batch_id"])
+        progress = self.wait_for_progress(runner, self.project.project_id)
+        self.assertTrue(progress["moved_any"], progress)
+        handler = self.poll_handler(self.context_for(runner))
+        http_api.Handler.api_quarantine_progress(handler)
+        self.assertEqual(handler.payload.get("stage"), "complete", handler.payload)
+        self.assertEqual(
+            self.invalidations,
+            [self.project.project_id],
+            "恢复真的搬回了文件，必须作废相似连拍缓存",
+        )
+
+    def test_a_noop_restore_does_not_latch_moved_any(self) -> None:
+        """Re-restoring a fully restored batch moves nothing -- flag stays off.
+
+        This pins the ``moved_any`` semantics on the restore side: a run that
+        only re-confirms already-restored entries must not look like one that
+        moved files, or every re-click would needlessly drop the cache.
+
+        Reverse proof: latching from ``len(manifest)`` or unconditionally
+        makes ``moved_any`` True here and fails the assertion.
+        """
+        batch = self.quarantined(["n1.jpg", "n2.jpg"])
+        restore_batch(self.project, batch["batch_id"])
+        runner = http_api.QuarantineRunner(
+            self.manager, Scanner(self.config, self.manager).project_operation
+        )
+        runner.start_restore(self.project.project_id, batch["batch_id"])
+        progress = self.wait_for_progress(runner, self.project.project_id)
+        self.assertEqual(progress["result"]["restored"], 0, progress)
+        self.assertFalse(progress["moved_any"], progress)
+
+    def test_restore_route_returns_started_without_blocking(self) -> None:
+        """The restore route hands back the batch id and returns at once.
+
+        Reverse proof: the old synchronous handler finished the whole restore
+        before replying and sent ``{"restored", ...}`` -- the payload shape
+        assertions fail that, and the quarantine-root assertion proves the
+        route returned while the file was still in quarantine rather than
+        doing the work inline.
+        """
+        batch = self.quarantined(["z.jpg"])
+        scanner = Scanner(self.config, self.manager)
+        application = http_api.ApplicationContext(
+            self.config,
+            self.manager,
+            scanner,
+            SimilarityGroupCache(),
+            "test-token",
+            Path("web"),
+        )
+        release = threading.Event()
+        real_restore = quarantine_service.restore_batch
+
+        def slow_restore(project, batch_id, report=None):
+            release.wait(30)
+            return real_restore(project, batch_id, report)
+
+        sent: list[dict[str, Any]] = []
+        context = application
+
+        class FakeHandler:
+            application = context
+
+            @property
+            def quarantine_runner(self):
+                return context.quarantine_runner
+
+            def _send_json(self, payload):
+                sent.append(payload)
+
+        with mock.patch.object(quarantine_service, "restore_batch", slow_restore):
+            http_api.Handler.api_restore(
+                FakeHandler(),
+                {
+                    "project_id": self.project.project_id,
+                    "batch_id": batch["batch_id"],
+                },
+            )
+            # The route returned while the file was still quarantined.
+            quarantine_root = quarantine_service._quarantine_batch_root(
+                self.project, batch["batch_id"]
+            )
+            self.assertFalse(
+                (self.photos / "z.jpg").exists(), "文件被同步搬回了原处"
+            )
+            self.assertTrue(
+                (quarantine_root / "z.jpg").exists(), "文件应仍在隔离区"
+            )
+        self.assertEqual(len(sent), 1, sent)
+        self.assertEqual(sent[0]["batch_id"], batch["batch_id"], sent[0])
+        self.assertTrue(sent[0]["started"], sent[0])
+        self.assertEqual(sent[0]["operation"], "restore", sent[0])
+        # Now let the background run finish and check it really restored.
+        release.set()
+        for _ in range(600):
+            if application.quarantine_runner.get_progress(
+                self.project.project_id
+            ).get("done"):
+                break
+            time.sleep(0.02)
+        self.assertTrue((self.photos / "z.jpg").exists())
+
+    def test_quarantine_payloads_carry_their_operation_too(self) -> None:
+        """The field is not restore-specific: quarantine runs report it too.
+
+        The busy toast reads the operation off the response, so the default
+        flow must say ``quarantine`` just as explicitly -- an omitted field
+        would silently fall back to whatever the front-end guesses.
+        """
+        self.prepare(["op.jpg"])
+        scanner = Scanner(self.config, self.manager)
+        runner = http_api.QuarantineRunner(
+            self.manager, scanner.project_operation
+        )
+        started = runner.start(self.project.project_id)
+        self.assertEqual(started["operation"], "quarantine", started)
+        final = self.wait_for_progress(runner, self.project.project_id)
+        self.assertEqual(final["operation"], "quarantine", final)
+
+    def poll_handler(self, context: Any) -> Any:
+        project_id = self.project.project_id
+
+        class FakeHandler:
+            application = context
+
+            @property
+            def quarantine_runner(self):
+                return context.quarantine_runner
+
+            @property
+            def similarity_groups(self):
+                return context.similarity_groups
+
+            def _query(self):
+                return {"project_id": [project_id]}
+
+            def _send_json(self, payload):
+                self.payload = payload
+
+        return FakeHandler()
+
+    def context_for(self, runner: Any) -> Any:
+        """A stand-in exposing what ``api_quarantine_progress`` reads."""
+        cache = SimilarityGroupCache()
+        self._invalidations: list[str] = []
+        cache.invalidate = self._invalidations.append  # type: ignore[method-assign]
+
+        class Context:
+            quarantine_runner = runner
+
+        context = Context()
+        context.similarity_groups = cache  # type: ignore[attr-defined]
+        return context
+
+    @property
+    def invalidations(self) -> list[str]:
+        return getattr(self, "_invalidations", [])
+
+
 class ViewerPagingRaceQATests(unittest.TestCase):
     """Independent QA pass on the viewer paging, written against the *races*.
 
@@ -6728,6 +7102,355 @@ class QuarantineProgressCacheQATests(unittest.TestCase):
             [self.project.project_id],
             "文件已经搬走却因 stage=error 不作废缓存，缓存将长期描述一批不存在的照片",
         )
+
+
+class RestoreProgressFrontendQATests(unittest.TestCase):
+    """gallery.js 的恢复进度前端：浮条复用、忙碌分流、撤销按钮绝不出现。
+
+    后端测试（RestoreProgressTests）只保证 payload 正确；这一层用真实
+    gallery.js 跑 Node，钉住前端的三个裁决：恢复复用隔离的浮条与轮询、
+    started=False 时不弹浮条不轮询、以及恢复的完成行**绝不**碰
+    #quarantineUndoBtn（quarantineProgressFinish 会往它写 batch——恢复
+    走共享完成行的话，撤销按钮就回来了）。
+    """
+
+    SCRIPT = """
+    const fs = require("fs");
+    const source = fs.readFileSync(process.env.QA_GALLERY, "utf8");
+
+    function makeEl(id) {
+      return {
+        id, style: {}, dataset: {}, disabled: false, onclick: null,
+        classList: {
+          _s: new Set(["hidden"]),
+          add(...cs) { cs.forEach((c) => this._s.add(c)); },
+          remove(...cs) { cs.forEach((c) => this._s.delete(c)); },
+          contains(c) { return this._s.has(c); },
+          toggle(c, on) { on ? this._s.add(c) : this._s.delete(c); },
+        },
+        _text: "",
+        set textContent(v) { this._text = String(v ?? ""); },
+        get textContent() { return this._text; },
+        _html: "",
+        set innerHTML(v) { this._html = String(v ?? ""); },
+        get innerHTML() { return this._html; },
+        _listeners: {},
+        addEventListener(ev, fn) { (this._listeners[ev] ??= []).push(fn); },
+        open: false,
+        showModal() { this.open = true; },
+        close() {
+          this.open = false;
+          (this._listeners.close || []).forEach((fn) => fn());
+        },
+      };
+    }
+    const els = new Map();
+    const $ = (sel) => {
+      const id = sel.replace(/^#/, "");
+      if (!els.has(id)) els.set(id, makeEl(id));
+      return els.get(id);
+    };
+    const __el = (id) => $( "#" + id);
+    global.__el = __el;
+    global.$ = $;
+    global.window = { matchMedia: () => ({ matches: false }) };
+    global.document = { querySelector: $ };
+    global.state = {
+      project: { id: "p1" }, view: "library", items: [],
+      settings: {}, similar: {}, library: { loading: false },
+    };
+    global.__toasts = [];
+    global.toast = (m) => global.__toasts.push(String(m));
+    global.__refreshed = 0;
+    global.refreshProject = async () => { global.__refreshed += 1; };
+    global.__views = 0;
+    global.loadView = async () => { global.__views += 1; };
+    global.esc = (s) => String(s);
+    global.formatSize = (n) => `${n}B`;
+    global.__confirmButton = { textContent: "", onclick: null, disabled: false };
+    global.prepareConfirmAction = () => global.__confirmButton;
+    global.__calls = [];
+    global.__routes = [];
+    global.json = async (url, body) => {
+      global.__calls.push({ url, body: body ?? null });
+      const hit = global.__routes.find((r) => r.match(url));
+      if (!hit) throw new Error("没有响应器: " + url);
+      return hit.reply(url, body);
+    };
+    // Node 把 setTimeout(0) 钳到 ~1ms；轮询的 wait(500) 按 1ms 算即可。
+    global.wait = (ms) => new Promise((resolve) => setTimeout(resolve, 1));
+    global.__sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    // 等浮条进入完成态（完成行取消 hidden），否则在预期时间内报错。
+    global.__drain = async () => {
+      for (let i = 0; i < 400; i += 1) {
+        if (!__el("quarantineProgressDone").classList.contains("hidden")) return;
+        await __sleep(5);
+      }
+      throw new Error("浮条未在预期时间内进入完成态");
+    };
+    global.__reset = () => {
+      global.__toasts.length = 0;
+      global.__calls.length = 0;
+      global.__routes.length = 0;
+      global.__refreshed = 0;
+      global.__views = 0;
+      for (const el of els.values()) {
+        el.classList._s = new Set(["hidden"]);
+        el.textContent = "";
+        el.dataset = {};
+        el.onclick = null;
+      }
+      state.project = { id: "p1" };
+    };
+
+    const src = source + `
+;module.exports = {
+  pollQuarantineProgress, quarantine, restore, confirmRestore,
+  quarantineProgressShow, quarantineProgressRender,
+  quarantineProgressFinish, restoreProgressFinish,
+};
+// gallery.js 自带 loadView（渲染整个视图），它会牵出整套 DOM 依赖；这里
+// 只测进度浮条，用函数声明的可写绑定把它换成计数桩。
+;loadView = async () => { global.__views += 1; };
+`;
+    const module_ = { exports: {} };
+    new Function("module", "exports", "require", src)(
+      module_, module_.exports, require,
+    );
+    global.__gallery = module_.exports;
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.node = shutil.which("node")
+        if not cls.node:
+            raise unittest.SkipTest("需要 node 才能执行 gallery.js 的恢复进度逻辑")
+        cls.web = Path(__file__).parents[1] / "web" / "js" / "gallery.js"
+        cls.harness = Path(tempfile.mkdtemp()) / "qa-restore-progress-harness.js"
+        cls.harness.write_text(cls.SCRIPT, encoding="utf-8")
+
+    def run_gallery(self, body: str) -> dict[str, Any]:
+        script = (
+            f"require({str(self.harness)!r});\n"
+            f"const {{ restore, quarantine, pollQuarantineProgress }} = __gallery;\n"
+            f"(async () => {{\n{body}\n}})().catch((e) => {{\n"
+            f"  console.error(e && e.stack || e);\n"
+            f"  process.exit(1);\n}});\n"
+        )
+        completed = subprocess.run(
+            [self.node, "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "QA_GALLERY": str(self.web)},
+        )
+        if completed.returncode != 0:
+            self.fail(f"node 执行失败：\n{completed.stderr}")
+        return json.loads(completed.stdout.strip().splitlines()[-1])
+
+    def test_a_started_restore_reuses_the_panel_and_never_the_undo_button(
+        self,
+    ) -> None:
+        """Happy path: panel shows, finish line renders, undo stays untouched.
+
+        Reverse proofs: routing the restore finish through
+        ``quarantineProgressFinish`` writes ``undoBatch = "b-restore"`` (the
+        undo button would come back); dropping the show call from
+        ``restore()`` leaves the panel hidden; dropping the toast or the
+        refresh leaves them empty/zero.
+        """
+        result = self.run_gallery(
+            """
+            __reset();
+            __routes.push({
+              match: (u) => u.startsWith("/api/quarantine/restore"),
+              reply: () => ({ batch_id: "b-restore", started: true, operation: "restore" }),
+            });
+            let ticks = 0;
+            __routes.push({
+              match: (u) => u.includes("/api/quarantine/progress"),
+              reply: () => {
+                ticks += 1;
+                if (ticks < 3) {
+                  return { batch_id: "b-restore", operation: "restore",
+                           stage: "restoring", current: ticks, total: 5,
+                           current_file: "trip/IMG_000" + ticks + ".JPG",
+                           moved: ticks, failed: 0, done: false, moved_any: true };
+                }
+                return { batch_id: "b-restore", operation: "restore",
+                         stage: "complete", done: true, moved_any: true,
+                         result: { restored: 5, conflicts: 1, missing: 2 } };
+              },
+            });
+            __el("quarantineUndoBtn").dataset.batch = "sentinel";
+            await restore("b-restore");
+            await __drain();
+            console.log(JSON.stringify({
+              calls: __calls.map((c) => c.url),
+              title: __el("quarantineProgressTitle").textContent,
+              doneText: __el("quarantineProgressDoneText").textContent,
+              detail: __el("quarantineProgressDetail").textContent,
+              doneVisible: !__el("quarantineProgressDone").classList.contains("hidden"),
+              panelVisible: !__el("quarantineProgress").classList.contains("hidden"),
+              undoBatch: __el("quarantineUndoBtn").dataset.batch,
+              toasts: __toasts,
+              refreshed: __refreshed,
+              views: __views,
+            }));
+            """
+        )
+        self.assertEqual(len(result["calls"]), 4, result)
+        self.assertTrue(
+            result["calls"][0].startswith("/api/quarantine/restore"), result
+        )
+        self.assertTrue(result["panelVisible"], f"恢复没有弹出进度浮条：{result}")
+        self.assertEqual(result["title"], "恢复完成", result)
+        self.assertEqual(
+            result["doneText"],
+            "完成：恢复 5 张 · 文件名冲突 1 张 · 缺失 2 张",
+            result,
+        )
+        self.assertEqual(result["detail"], "", result)
+        self.assertTrue(result["doneVisible"], result)
+        self.assertEqual(
+            result["undoBatch"],
+            "sentinel",
+            f"恢复的完成行改写了撤销按钮的批次：{result}",
+        )
+        self.assertIn("完成：恢复 5 张 · 文件名冲突 1 张 · 缺失 2 张", result["toasts"], result)
+        self.assertEqual(result["refreshed"], 1, result)
+        self.assertEqual(result["views"], 1, result)
+
+    def test_a_refused_restore_neither_shows_the_panel_nor_polls(self) -> None:
+        """started=False: one toast naming the running job, nothing else.
+
+        Reverse proofs: polling despite refusal adds a progress call (and a
+        bogus error toast, since this harness has no responder for it);
+        showing the panel despite refusal flips ``panelVisible``; a
+        hardcoded 隔离 wording fails the exact-toast assertion.
+        """
+        result = self.run_gallery(
+            """
+            __reset();
+            __routes.push({
+              match: (u) => u.startsWith("/api/quarantine/restore"),
+              reply: () => ({ batch_id: "b-other", started: false, operation: "quarantine" }),
+            });
+            await restore("b-mine");
+            await __sleep(30);
+            console.log(JSON.stringify({
+              calls: __calls.map((c) => c.url),
+              toasts: __toasts,
+              panelVisible: !__el("quarantineProgress").classList.contains("hidden"),
+              refreshed: __refreshed,
+              views: __views,
+            }));
+            """
+        )
+        self.assertEqual(
+            result["calls"],
+            ["/api/quarantine/restore"],
+            f"被拒绝的恢复不得继续轮询进度：{result}",
+        )
+        self.assertEqual(
+            result["toasts"],
+            ["已有任务进行中（隔离）"],
+            f"忙碌提示必须按实际在跑的操作措辞：{result}",
+        )
+        self.assertFalse(result["panelVisible"], f"被拒绝的恢复弹了浮条：{result}")
+        self.assertEqual(result["refreshed"], 0, result)
+        self.assertEqual(result["views"], 0, result)
+
+    def test_quarantine_busy_toast_names_a_running_restore(self) -> None:
+        """The quarantine flow's refusal toast is generalized, not hardcoded.
+
+        Sequence: preview → apply refused (a restore owns the slot) → the
+        existing re-poll re-attaches to the restore's progress → the restore
+        finish line renders. Reverse proofs: the old hardcoded
+        「已有一个隔离任务在进行中」 fails the first assertion; if the re-poll
+        ran the quarantine finish path instead, the done text would read
+        已隔离 and the undo button would get the batch written to it.
+        """
+        result = self.run_gallery(
+            """
+            __reset();
+            __routes.push({
+              match: (u) => u.includes("/api/quarantine/preview"),
+              reply: () => ({ count: 2, total_size: 123,
+                              items: [{ relative_path: "a.jpg" }, { relative_path: "b.jpg" }] }),
+            });
+            __routes.push({
+              match: (u) => u.startsWith("/api/quarantine/apply"),
+              reply: () => ({ batch_id: "b-restore", started: false, operation: "restore" }),
+            });
+            __routes.push({
+              match: (u) => u.includes("/api/quarantine/progress"),
+              reply: () => ({ batch_id: "b-restore", operation: "restore",
+                              stage: "complete", done: true, moved_any: true,
+                              result: { restored: 3, conflicts: 0, missing: 0 } }),
+            });
+            __el("quarantineUndoBtn").dataset.batch = "sentinel";
+            await quarantine();
+            await __confirmButton.onclick();
+            await __drain();
+            console.log(JSON.stringify({
+              toasts: __toasts,
+              title: __el("quarantineProgressTitle").textContent,
+              doneText: __el("quarantineProgressDoneText").textContent,
+              undoBatch: __el("quarantineUndoBtn").dataset.batch,
+            }));
+            """
+        )
+        self.assertEqual(
+            result["toasts"][0],
+            "已有任务进行中（恢复）",
+            f"隔离被恢复占用时，提示必须说是恢复：{result}",
+        )
+        self.assertEqual(result["title"], "恢复完成", result)
+        self.assertEqual(result["doneText"], "完成：恢复 3 张", result)
+        self.assertEqual(
+            result["undoBatch"],
+            "sentinel",
+            f"恢复完成行写入了撤销按钮：{result}",
+        )
+
+    def test_a_restore_error_names_itself_in_the_panel_and_toast(self) -> None:
+        """stage=error on a restore must read 恢复失败, not 隔离失败.
+
+        Reverse proof: routing the error branch through the quarantine path
+        (as the pre-change poller did unconditionally) produces the 隔离
+        wording and fails all three assertions below.
+        """
+        result = self.run_gallery(
+            """
+            __reset();
+            __routes.push({
+              match: (u) => u.startsWith("/api/quarantine/restore"),
+              reply: () => ({ batch_id: "b-restore", started: true, operation: "restore" }),
+            });
+            __routes.push({
+              match: (u) => u.includes("/api/quarantine/progress"),
+              reply: () => ({ batch_id: "b-restore", operation: "restore",
+                              stage: "error", done: true, error: "隔离批次不存在" }),
+            });
+            await restore("b-restore");
+            await __sleep(30);
+            console.log(JSON.stringify({
+              title: __el("quarantineProgressTitle").textContent,
+              detail: __el("quarantineProgressDetail").textContent,
+              toasts: __toasts,
+              refreshed: __refreshed,
+              views: __views,
+            }));
+            """
+        )
+        self.assertEqual(result["title"], "恢复失败", result)
+        self.assertEqual(result["detail"], "隔离批次不存在", result)
+        self.assertEqual(
+            result["toasts"], ["恢复失败：隔离批次不存在"], result
+        )
+        self.assertEqual(result["refreshed"], 1, result)
+        self.assertEqual(result["views"], 1, result)
 
 
 if __name__ == "__main__":

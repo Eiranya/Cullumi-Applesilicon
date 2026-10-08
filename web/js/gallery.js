@@ -709,7 +709,27 @@ function quarantineProgressFinish(result) {
   if (failed) toast(`${text}（${failed} 张未能移入隔离区）`);
   else toast(text);
 }
-async function pollQuarantineProgress(projectId, batchId) {
+// 恢复的完成行与隔离分开写、不走参数化：恢复**绝不出现撤销按钮**（用户明确
+// ruling），而 quarantineProgressFinish 的职责里就包括往 #quarantineUndoBtn
+// 写 dataset.batch 和「已隔离」文案——共享这段代码，将来任何一次改动都可能
+// 把撤销按钮带回恢复流程。文案按「恢复 N 张 · 文件名冲突 M 张（· 缺失 K 张）」
+// 组装，冲突/缺失为 0 时省略对应段。
+function restoreProgressFinish(result) {
+  const restored = result.restored || 0,
+    conflicts = result.conflicts || 0,
+    missing = result.missing || 0;
+  let text = `完成：恢复 ${restored} 张`;
+  if (conflicts) text += ` · 文件名冲突 ${conflicts} 张`;
+  if (missing) text += ` · 缺失 ${missing} 张`;
+  $("#quarantineProgressTitle").textContent = "恢复完成";
+  $("#quarantineProgressDetail").textContent = "";
+  $("#quarantineProgressBar").style.width = "100%";
+  $("#quarantineProgressBar").classList.remove("indeterminate");
+  $("#quarantineProgressDone").classList.remove("hidden");
+  $("#quarantineProgressDoneText").textContent = text;
+  toast(text);
+}
+async function pollQuarantineProgress(projectId, batchId, operation = "quarantine") {
   while (state.project?.id === projectId) {
     let p;
     try {
@@ -725,11 +745,20 @@ async function pollQuarantineProgress(projectId, batchId) {
       // 后来的批次接管了这个项目的进度槽位（用户又点了一次隔离）。
       return;
     }
+    // 后端 payload 里带了真实的操作类型；start 响应里的 operation 只在
+    // 任务刚发起时可信，槽位被接管的场景以 payload 为准。
+    if (p.operation) operation = p.operation;
     if (p.stage === "error") {
-      quarantineProgressFinish({ batch_id: batchId, moved: p.moved, failed: 0 });
-      $("#quarantineProgressTitle").textContent = "隔离失败";
-      $("#quarantineProgressDetail").textContent = p.error || "";
-      toast(`隔离失败：${p.error || "未知错误"}`);
+      if (operation === "restore") {
+        $("#quarantineProgressTitle").textContent = "恢复失败";
+        $("#quarantineProgressDetail").textContent = p.error || "";
+        toast(`恢复失败：${p.error || "未知错误"}`);
+      } else {
+        quarantineProgressFinish({ batch_id: batchId, moved: p.moved, failed: 0 });
+        $("#quarantineProgressTitle").textContent = "隔离失败";
+        $("#quarantineProgressDetail").textContent = p.error || "";
+        toast(`隔离失败：${p.error || "未知错误"}`);
+      }
       await refreshProject();
       loadView();
       return;
@@ -739,8 +768,12 @@ async function pollQuarantineProgress(projectId, batchId) {
       await wait(500);
       continue;
     }
-    const result = p.result || { batch_id: batchId, moved: p.moved, failed: p.failed };
-    quarantineProgressFinish(result);
+    if (operation === "restore") {
+      restoreProgressFinish(p.result || {});
+    } else {
+      const result = p.result || { batch_id: batchId, moved: p.moved, failed: p.failed };
+      quarantineProgressFinish(result);
+    }
     await refreshProject();
     loadView();
     setTimeout(quarantineProgressHide, 6000);
@@ -765,27 +798,38 @@ async function quarantine() {
   button.onclick = async () => {
     $("#confirm").close();
     const projectId = state.project.id;
-    quarantineProgressShow("正在隔离");
     // apply 立刻返回 batch_id，隔离在后台线程里跑。
     const r = await json("/api/quarantine/apply", {
       project_id: projectId,
     });
+    // 浮条标题按实际在跑的操作定：槽位也可能被一次恢复占着，这时标题写
+    // 「正在隔离」就是错的。started=False 时同样复挂到那条进度上接着看。
+    quarantineProgressShow(r.operation === "restore" ? "正在恢复" : "正在隔离");
     if (!r.started) {
-      // 上一次隔离还在跑。不重复发起，接着看同一条进度。
-      toast("已有一个隔离任务在进行中");
+      // 槽位被占（隔离或恢复都算）。不重复发起，接着看同一条进度；提示按
+      // 实际在跑的操作措辞，而不是死写「隔离」。
+      toast(`已有任务进行中（${r.operation === "restore" ? "恢复" : "隔离"}）`);
     }
-    pollQuarantineProgress(projectId, r.batch_id);
+    pollQuarantineProgress(projectId, r.batch_id, r.operation || "quarantine");
   };
   $("#confirm").showModal();
 }
 async function restore(id) {
+  const projectId = state.project.id;
+  // 恢复与隔离共用同一套后台进度：POST 立即返回 batch_id，搬文件在
+  // QuarantineRunner 的线程里进行，进度从同一条 /api/quarantine/progress 读。
   const r = await json("/api/quarantine/restore", {
-    project_id: state.project.id,
+    project_id: projectId,
     batch_id: id,
   });
-  toast(`恢复 ${r.restored} 张，文件名冲突 ${r.conflicts} 张`);
-  await refreshProject();
-  loadView();
+  if (!r.started) {
+    // 后端拒绝（同一项目已有任务在跑）。不弹浮条、不轮询：槽位里的进度属于
+    // 那个在跑的任务，用户要么正在看它、要么它已结束，再挂一条只会误导。
+    toast(`已有任务进行中（${r.operation === "quarantine" ? "隔离" : "恢复"}）`);
+    return;
+  }
+  quarantineProgressShow("正在恢复");
+  pollQuarantineProgress(projectId, r.batch_id, "restore");
 }
 function confirmRestore(id) {
   const dialog = $("#confirm"),
@@ -798,14 +842,13 @@ function confirmRestore(id) {
     once: true,
   });
   button.onclick = async () => {
-    button.disabled = true;
+    // 确认框先关：恢复在后台线程跑，浮条负责进度，对话框不再悬着等整个
+    // 批次搬完（大批量时那就是「卡住不动」本身）。POST 失败仍用 toast 报。
+    dialog.close();
     try {
       await restore(id);
-      dialog.close();
     } catch (error) {
       toast(`恢复失败：${error.message}`);
-    } finally {
-      button.disabled = false;
     }
   };
   dialog.showModal();
